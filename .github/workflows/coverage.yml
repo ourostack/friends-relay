@@ -1,4 +1,4 @@
-name: coverage-gate
+name: ci
 
 on:
   pull_request:
@@ -33,3 +33,16 @@ jobs:
 
       - name: Run Coverage Gate
         run: npm run test:coverage
+
+  docker-build:
+    # Build the production image on every PR/push so a Dockerfile or build-stage
+    # regression fails CI instead of slipping silently through to deploy (e.g. the
+    # `prepare`/`npm ci` ordering bug fixed in #2 — the coverage-gate job never
+    # exercises the image). Docker is preinstalled on ubuntu-latest runners.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build Docker image
+        run: docker build -t friends-relay-ci .
