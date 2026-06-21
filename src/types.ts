@@ -94,11 +94,11 @@ export interface RegistrationGrant {
   /** Bearer token to DRAIN this handle's inbox (pull). Rotated on re-registration. */
   inboxAuth: string
   /** The SEND credential other agents present to post to this handle. Rotating by
-   * default (fork 12) — minimizes the relay's ability to link a sender's out-graph. */
+   * default — minimizes the relay's ability to link a sender's full out-graph. */
   sendCredential: string
 }
 
-/** The relay's own A2A agent card (it is itself an A2A agent — fork 14). */
+/** The relay's own A2A agent card (it is itself an A2A agent). */
 export interface RelayAgentCard {
   name: string
   description: string

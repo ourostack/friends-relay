@@ -1,6 +1,6 @@
-// agent-card — the relay's OWN A2A agent card (fork 14: the relay is itself an A2A
-// agent, with a card + DID, so an agent can verify it reached the EXPECTED relay —
-// TLS cert + the relay's DID — even though no one trusts the relay with content).
+// agent-card — the relay's OWN A2A agent card. The relay is itself an A2A agent,
+// with a card + DID, so an agent can verify it reached the EXPECTED relay — TLS cert
+// + the relay's DID — even though no one trusts the relay with content.
 // The relay advertises NO content capability beyond enqueue/dequeue; it asserts no
 // transport security scheme here (the E2E overlay is the real security; the relay's
 // bearer scheme is deploy/host config).

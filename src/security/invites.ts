@@ -1,8 +1,8 @@
-// security/invites — invite-gated registration (p8 §2.3 + fork 9: closed by
-// default, NO open signup). An invite token is minted by an admin-cred-gated path
-// and consumed once at registration. Single-use by default; a token may be minted
-// with a use cap (e.g. an operator handing one invite to a small fleet). Open
-// registration is a per-deploy POLICY override (config), never the default.
+// security/invites — invite-gated registration: closed membership by default, NO
+// open signup. An invite token is minted by an admin-credential-gated path and
+// consumed once at registration. Single-use by default; a token may be minted with a
+// use cap (e.g. handing one invite to a small fleet). Open registration is a
+// per-deployment POLICY override (config), never the default.
 import type { TokenSource } from "./tokens"
 
 interface InviteRecord {
