@@ -1,0 +1,53 @@
+{
+  "name": "@ouro.bot/friends-relay",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "A content-blind, abuse-resistant A2A relay + directory for friends-using agents. Store-and-forward of sealed ciphertext for offline/NAT'd peers; invite-gated, rate-limited, bounded. The relay carries SealedEnvelopes opaquely — it can never read, forge, tamper, re-target, replay-to-effect, or escalate.",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    }
+  },
+  "bin": {
+    "friends-relay": "./dist/bin.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "postbuild": "node -e \"require('fs').chmodSync('dist/bin.js', 0o755)\"",
+    "prepare": "npm run build",
+    "pretest": "npm run build",
+    "pretest:coverage": "npm run build",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/bin.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ourostack/friends-relay.git"
+  },
+  "devDependencies": {
+    "@ouro.bot/friends": "0.1.0-alpha.5",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "eslint": "^10.0.2",
+    "libsodium-wrappers": "0.8.4",
+    "@types/libsodium-wrappers": "0.8.2",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.56.1",
+    "vitest": "^4.1.8"
+  }
+}
