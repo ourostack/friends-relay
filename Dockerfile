@@ -14,7 +14,11 @@
 FROM node:20-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json* .npmrc ./
-RUN npm ci
+# --ignore-scripts: skip the `prepare` lifecycle (which runs `tsc`) here — tsconfig
+# and src/ aren't copied yet, so it would build with no config/input and fail. The
+# explicit `npm run build` below compiles once src is in place. `prepare` stays in
+# package.json so git-installs of the client still build dist/ on install.
+RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
