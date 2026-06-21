@@ -1,9 +1,8 @@
-// store/interfaces — the swappable backend seam (p8 §2.5: "the inbox store is an
-// interface; a reference in-memory impl ships; production backends are adapters; NO
-// infra is hardcoded"). The relay core depends ONLY on these interfaces, so a
-// deployment can back them with any queue/KV/object store via an adapter. This file
-// is pure types — excluded from the coverage gate (mirrors friends excluding its
-// FriendStore interface).
+// store/interfaces — the swappable backend seam. The inbox store is an interface; a
+// reference in-memory impl ships; production backends are adapters; NO infra is
+// hardcoded. The relay core depends ONLY on these interfaces, so a deployment can
+// back them with any queue/KV/object store via an adapter. This file is pure types —
+// excluded from the coverage gate (a pure interface).
 
 import type { Registration, QueuedMessage, A2AMessage } from "../types"
 

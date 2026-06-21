@@ -86,7 +86,8 @@ export class Relay {
     this.sendLimiter = new RateLimiter(deps.config.sendRateLimit, deps.clock)
   }
 
-  /** The relay's own A2A agent card (it is itself an A2A agent — fork 14). */
+  /** The relay's own A2A agent card (it is itself an A2A agent, so a client can
+   * verify it reached the expected relay). */
   agentCard(): RelayAgentCard {
     return buildRelayAgentCard({
       url: this.deps.config.publicUrl,
@@ -181,8 +182,8 @@ export class Relay {
       this.deps.logger.log("warn", "enqueue_rejected", { handle: input.handle, reason: "bad_send_credential" })
       return { ok: false, error: "bad_send_credential" }
     }
-    // Rate-limit on the send credential (the rate-limit subject — fork 12 keeps this
-    // from being a stable per-agent identity by default).
+    // Rate-limit on the send credential (the rate-limit subject — a rotating
+    // credential keeps this from being a stable per-agent identity by default).
     if (!this.sendLimiter.take(input.sendCredential)) {
       this.deps.logger.log("warn", "enqueue_rejected", { handle: input.handle, reason: "rate_limited" })
       return { ok: false, error: "rate_limited" }

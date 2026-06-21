@@ -5,9 +5,9 @@
 //                   (the pull/ack auth). Gates WHO can read a handle's inbox; it
 //                   does NOT gate confidentiality (that's E2E, client-side).
 //   2. sendCredential — what other agents present to POST to a handle. ROTATING by
-//                   default (fork 12): a fresh credential per registration, so the
-//                   relay can't build one sender's full out-graph from one stable
-//                   credential. The send credential is the rate-limit SUBJECT.
+//                   default: a fresh credential per registration, so the relay can't
+//                   build one sender's full out-graph from one stable credential. The
+//                   send credential is the rate-limit SUBJECT.
 //
 // Both are opaque random strings (security/tokens). Re-registration ROTATES both,
 // invalidating the prior pair.

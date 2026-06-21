@@ -1,6 +1,6 @@
-// store/memory — the reference in-memory backends (p8 §2.5 blesses an in-memory
-// backend for v1 + tests). They implement the swappable interfaces; a production
-// deployment swaps in a durable adapter without touching the relay core.
+// store/memory — the reference in-memory backends (the v1 + test default). They
+// implement the swappable interfaces; a production deployment swaps in a durable
+// adapter without touching the relay core.
 //
 // SECURITY-RELEVANT: the InboxStore is BOUNDED. Each handle's queue is capped by a
 // message COUNT and a total BYTE budget; an enqueue past either cap is DROPPED (not

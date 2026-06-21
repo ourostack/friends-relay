@@ -1,7 +1,7 @@
 // security/rate-limit — a per-key token-bucket rate limiter. Keys are send
-// credentials and recipient handles (p8 §2.3: "per-credential + per-handle rate
-// limits"). Refill is clock-driven (injectable clock → deterministic tests, no real
-// timers). Denying is always safe (a denied enqueue is a denial, never corruption).
+// credentials (per-credential rate limits). Refill is clock-driven (injectable clock
+// → deterministic tests, no real timers). Denying is always safe (a denied enqueue
+// is a denial, never corruption).
 
 import type { Clock } from "../clock"
 

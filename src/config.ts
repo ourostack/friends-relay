@@ -1,15 +1,15 @@
-// config — 12-factor config, read ENTIRELY from injected env. NOTHING about cloud,
-// region, or a managed service is hardcoded (p8 §2.5: infra-agnostic — "it deploys
-// on the operator's personal-ouro infra later"). The relay reads its bind address,
-// TLS posture (terminated upstream by an injected proxy by default), invite policy,
-// quotas/limits/TTL, its own DID/URL, and the admin credential from env.
+// config — 12-factor config, read ENTIRELY from injected env. The relay is
+// infra-agnostic: NOTHING about any cloud, region, or managed service is hardcoded,
+// so it runs on whatever infrastructure a deployment provides. It reads its bind
+// address, TLS posture (terminated upstream by an injected proxy by default), invite
+// policy, quotas/limits/TTL, its own DID/URL, and the admin credential from env.
 
 import type { InboxBounds } from "./store/memory"
 import type { RateLimitConfig } from "./security/rate-limit"
 
-/** Registration policy. `closed` (default, fork 9) = invite-gated. `open` = a
- * per-deploy POLICY choice that accepts the spam/DoS surface (still rate-limited,
- * quota'd, bounded — never content-filtered). */
+/** Registration policy. `closed` (default) = invite-gated. `open` = a per-deploy
+ * POLICY choice that accepts the spam/DoS surface (still rate-limited, quota'd,
+ * bounded — never content-filtered). */
 export type InvitePolicy = "closed" | "open"
 
 /** The fully-resolved relay config. */
