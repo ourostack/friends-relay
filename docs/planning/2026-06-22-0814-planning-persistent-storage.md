@@ -104,4 +104,5 @@ Scratchpad (implementation specifics will move into the doing doc on conversion)
 - Whatever backend wins, keep an in-process/temp-file mode so the durable adapter's own unit tests need no network and no Azure.
 
 ## Progress Log
-- 2026-06-22 08:14 Created — investigated relay source (store interfaces, in-memory backends, security managers, relay core, config, bootstrap, http, tests, Dockerfile, CI). Enumerated the 5 state families, confirmed no relay-side replay ledger, identified the seam gap (invites + credentials not behind interfaces), captured the content-blind risk surface, and framed the backend choice as the central open question. Status: NEEDS_REVIEW.
+- 2026-06-22 08:14 Created — investigated relay source (store interfaces, in-memory backends, security managers, relay core, config, bootstrap, http, tests, Dockerfile, CI). Enumerated the 5 state families, confirmed no relay-side replay ledger, identified the seam gap (invites + credentials not behind interfaces), captured the content-blind risk surface, and framed the backend choice as the central open question.
+- 2026-06-22 08:16 Committed initial draft. Status: NEEDS_REVIEW — awaiting answers to the 5 open questions (backend choice, seam shape, rate-limiter persistence, replica count, native-module tolerance) before refining.
