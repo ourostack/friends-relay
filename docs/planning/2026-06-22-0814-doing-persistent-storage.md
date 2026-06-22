@@ -131,7 +131,7 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **What**: Confirm no branch regressed; tidy any awkward `Promise` plumbing; ensure the `EnqueueResult`/error unions are unchanged (only the wrapping `Promise` is new).
 **Acceptance**: 100% coverage on all touched files; suite green; diff is signature-only (no logic drift) for the in-memory path.
 
-### ⬜ Unit 2a: Postgres InboxStore adapter — tests (RED)
+### ✅ Unit 2a: Postgres InboxStore adapter — tests (RED)
 **What**: Write hermetic `pg-mem`-backed tests for a `PgInboxStore implements InboxStore`: enqueue/list/ack/dropExpired/depth over an in-process db (created via `pg-mem`'s `newDb().adapters.createPg()` → a `pg`-compatible `Pool`). Cover every branch the memory suite covers (count quota, byte quota, expired-not-counted-on-enqueue, list prunes expired, unknown handle empty, ack hit/miss/idempotent, dropExpired across handles, FIFO order across a simulated restart via a fresh adapter over the same db).
 **Acceptance**: Tests exist and FAIL (no `PgInboxStore` yet).
 
