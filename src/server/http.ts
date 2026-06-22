@@ -10,6 +10,8 @@ import { createServer as createHttpServer } from "node:http"
 import type { IncomingMessage, Server, ServerResponse } from "node:http"
 
 import type { RelayConfig } from "../config"
+import { silentLogger } from "../logger"
+import type { Logger } from "../logger"
 import type { Relay } from "../relay"
 
 /** A transport-free representation of an HTTP request (so handlers are pure +
@@ -221,12 +223,21 @@ export function toRelayRequest(input: {
   }
 }
 
-/** Bind the pure router to a real node:http server. The only un-pure wiring. */
-export function createServer(config: RelayConfig, relay: Relay): Server {
+/** Bind the pure router to a real node:http server. The only un-pure wiring. `logger`
+ * is used SOLELY to record a static event when a request handler rejects (e.g. a
+ * Postgres query throws mid-request) — it logs an event NAME only, never the error
+ * message / connection string / any content (the relay is content-blind end to end). */
+export function createServer(config: RelayConfig, relay: Relay, logger: Logger = silentLogger): Server {
   return createHttpServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = []
     req.on("data", (c: Buffer) => chunks.push(c))
     req.on("end", () => {
+      // The handler is async + can REJECT (the storage seam is async — a Postgres
+      // query can throw mid-request). Without this `.catch` the socket would hang
+      // forever (no response) AND the rejection would be unhandled. The catch writes a
+      // generic 500 + ends the socket, and logs a STATIC event name only — the caught
+      // error is deliberately NOT inspected, so nothing it carries (a message body, a
+      // connection string, any content) can leak into the log or the response.
       void (async () => {
         const raw = Buffer.concat(chunks).toString("utf8")
         let body: unknown
@@ -251,7 +262,13 @@ export function createServer(config: RelayConfig, relay: Relay): Server {
         )
         res.writeHead(response.status, { "content-type": "application/json" })
         res.end(JSON.stringify(response.body))
-      })()
+      })().catch(() => {
+        logger.log("error", "request_failed")
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "application/json" })
+        }
+        res.end(JSON.stringify({ error: "internal_error" }))
+      })
     })
   })
 }

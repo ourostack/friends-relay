@@ -391,4 +391,75 @@ describe("createServer — real socket round-trip", () => {
       expect(res.status).toBe(200)
     })
   })
+
+  it("a rejecting handle() responds 500 (does NOT hang) and leaks ONLY a static event name", async () => {
+    const { config } = makeRelay()
+    const logger = new MemoryLogger()
+    // A relay whose register() REJECTS mid-request (models a Postgres query throwing).
+    // The rejection error carries a secret-looking payload that must NEVER be logged.
+    const LEAK = "postgres://user:s3cr3t@db.internal:5432/relay sealed-ct-do-not-leak"
+    const throwingRelay = {
+      register: () => Promise.reject(new Error(LEAK)),
+    } as unknown as Relay
+    const server = createServer(config, throwingRelay, logger)
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const addr = server.address()
+    if (!addr || typeof addr === "string") throw new Error("no address")
+    const base = `http://127.0.0.1:${addr.port}`
+    try {
+      // The request would hang forever before the fix (no response is ever written).
+      // A 2s race guards against a regression masquerading as a slow pass.
+      const res = await Promise.race([
+        fetch(`${base}/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ handle: "h", did: "did:key:zR", agentCard: CARD, inviteToken: "t" }),
+        }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("socket hung — no 500 written")), 2000)),
+      ])
+      expect(res.status).toBe(500)
+      expect(await res.json()).toEqual({ error: "internal_error" })
+      // Exactly one static error event was logged, with NO fields that could carry
+      // the connection string / error message / any content.
+      const errs = logger.entries.filter((e) => e.level === "error")
+      expect(errs).toHaveLength(1)
+      expect(errs[0].event).toBe("request_failed")
+      // The leaked secret appears NOWHERE in the captured log (event name or fields).
+      expect(JSON.stringify(logger.entries).includes("s3cr3t")).toBe(false)
+      expect(JSON.stringify(logger.entries).includes("sealed-ct-do-not-leak")).toBe(false)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it("when the response was already partially written, the failure path still ends the socket without a double-writeHead", async () => {
+    const { config } = makeRelay()
+    const logger = new MemoryLogger()
+    // handle() RESOLVES fine, so the success path runs `res.writeHead(200)` — but the
+    // body is unserializable (a BigInt), so `JSON.stringify(response.body)` throws
+    // INSIDE `res.end(...)`, AFTER headers were sent. The catch must then skip the
+    // second writeHead (headersSent === true) and still end the socket (no hang).
+    const badBodyRelay = {
+      agentCard: () => ({ bad: 1n }),
+    } as unknown as Relay
+    const server = createServer(config, badBodyRelay, logger)
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const addr = server.address()
+    if (!addr || typeof addr === "string") throw new Error("no address")
+    const base = `http://127.0.0.1:${addr.port}`
+    try {
+      const res = await Promise.race([
+        // GET the relay card → handle() returns { status: 200, body: relay.agentCard() }.
+        fetch(`${base}/.well-known/agent-card.json`),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("socket hung")), 2000)),
+      ])
+      // Headers (200) were already flushed before the body-stringify threw; the socket
+      // is still ended (the body is empty/partial), and a static event was logged.
+      expect(res.status).toBe(200)
+      await res.text()
+      expect(logger.entries.filter((e) => e.event === "request_failed")).toHaveLength(1)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
 })
