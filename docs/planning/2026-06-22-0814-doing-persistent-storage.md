@@ -195,7 +195,7 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **What**: Confirm both selector branches + the fail-loud branch are covered; tidy.
 **Acceptance**: 100% coverage on the covered surface; green.
 
-### ⬜ Unit 7a: Dual-backend parity suite (`store.test.ts`) — parametrize over memory (RED→GREEN for memory)
+### ✅ Unit 7a: Dual-backend parity suite (`store.test.ts`) — parametrize over memory (RED→GREEN for memory)
 **What**: This is a **consolidation/refactor** unit (the `Pg*` adapters already exist + are individually tested by Units 2/3/5; their bespoke per-adapter tests from 2a/3a/5a are retained). Refactor `store.test.ts` from concrete `Memory*` calls into a parametrized suite driven by a backend table, starting with ONLY the memory row wired:
 ```ts
 const backends = [
@@ -206,7 +206,7 @@ const backends = [
 Every assertion becomes `await`-based (it already had to in Unit 1a). Because Unit 1 already made the memory stores async, the memory parametrization should pass; the RED here is mechanical (the refactor's intermediate compile state) — do not contrive a fake failure. The unit's real gate is that the memory parametrization is green and structurally ready for a second row.
 **Acceptance**: `store.test.ts` runs every behavioral assertion over the `memory` backend via the factory; green; coverage 100%.
 
-### ⬜ Unit 7b: Dual-backend parity suite — add the Postgres row (GREEN)
+### ✅ Unit 7b: Dual-backend parity suite — add the Postgres row (GREEN)
 **What**: Add the `postgres` backend row to the table, each `make*` returning a `Pg*` adapter over a fresh `pg-mem` pool + migrated schema (per-test or per-suite `beforeEach` builds `newDb().adapters.createPg()`). Add the per-backend content-blind assertion (Unit 2c's check) into the shared body so the "only ciphertext" proof runs over Postgres too. Resolve any semantic gap the shared assertions surface (this is the consolidation point where a `pg-mem`-unsupported branch would show as a blocker — apply the blocker-clause mitigation order; Pass-3 probing found none).
 **Acceptance**: The full `store.test.ts` passes identically over BOTH backends; 100% coverage; content-blind proof passes against Postgres.
 
