@@ -26,13 +26,13 @@ export class MemoryInboxStore implements InboxStore {
 
   constructor(private readonly bounds: InboxBounds) {}
 
-  enqueue(input: {
+  async enqueue(input: {
     handle: string
     message: A2AMessage
     enqueuedAt: number
     expiresAt: number
     sizeBytes: number
-  }): EnqueueResult {
+  }): Promise<EnqueueResult> {
     // Read the live (non-expired) queue so expired entries don't count against the
     // bound (and get dropped as a side effect of pruning).
     const live = this.livePrune(input.handle, input.enqueuedAt)
@@ -58,11 +58,11 @@ export class MemoryInboxStore implements InboxStore {
     return { ok: true, queueId }
   }
 
-  list(handle: string, now: number): QueuedMessage[] {
+  async list(handle: string, now: number): Promise<QueuedMessage[]> {
     return this.livePrune(handle, now).slice()
   }
 
-  ack(handle: string, queueId: string): boolean {
+  async ack(handle: string, queueId: string): Promise<boolean> {
     const q = this.queues.get(handle)
     if (!q) return false
     const idx = q.findIndex((m) => m.queueId === queueId)
@@ -72,7 +72,7 @@ export class MemoryInboxStore implements InboxStore {
     return true
   }
 
-  dropExpired(now: number): number {
+  async dropExpired(now: number): Promise<number> {
     let dropped = 0
     for (const [handle, q] of this.queues) {
       const before = q.length
@@ -87,7 +87,7 @@ export class MemoryInboxStore implements InboxStore {
     return dropped
   }
 
-  depth(handle: string, now: number): number {
+  async depth(handle: string, now: number): Promise<number> {
     return this.livePrune(handle, now).length
   }
 
@@ -112,7 +112,7 @@ export class MemoryRegistryStore implements RegistryStore {
   private readonly byHandle = new Map<string, Registration>()
   private readonly byDid = new Map<string, Registration>()
 
-  put(reg: Registration): void {
+  async put(reg: Registration): Promise<void> {
     // A re-registration under the same handle may carry a new DID binding; clear any
     // stale DID index entry that pointed at this handle before re-indexing.
     const prev = this.byHandle.get(reg.handle)
@@ -123,15 +123,15 @@ export class MemoryRegistryStore implements RegistryStore {
     this.byDid.set(reg.did, reg)
   }
 
-  getByHandle(handle: string): Registration | undefined {
+  async getByHandle(handle: string): Promise<Registration | undefined> {
     return this.byHandle.get(handle)
   }
 
-  getByDid(did: string): Registration | undefined {
+  async getByDid(did: string): Promise<Registration | undefined> {
     return this.byDid.get(did)
   }
 
-  remove(handle: string): boolean {
+  async remove(handle: string): Promise<boolean> {
     const reg = this.byHandle.get(handle)
     if (!reg) return false
     this.byHandle.delete(handle)

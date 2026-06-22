@@ -101,7 +101,7 @@ export class Relay {
 
   /** Issue an invite (the HTTP layer gates this behind the admin credential).
    * `uses` defaults to single-use. */
-  issueInvite(uses = 1): string {
+  async issueInvite(uses = 1): Promise<string> {
     return this.invites.issue(uses)
   }
 
@@ -109,7 +109,7 @@ export class Relay {
 
   /** Register (or re-register → ROTATE) a handle. Invite-gated unless policy=open.
    * Returns the credential grant (inboxAuth + rotating sendCredential). */
-  register(input: RegisterInput): { ok: true; grant: RegistrationGrant; relayCard: RelayAgentCard } | { ok: false; error: RegisterError } {
+  async register(input: RegisterInput): Promise<{ ok: true; grant: RegistrationGrant; relayCard: RelayAgentCard } | { ok: false; error: RegisterError }> {
     if (
       typeof input.handle !== "string" ||
       input.handle.length === 0 ||
@@ -132,7 +132,7 @@ export class Relay {
       }
     }
 
-    this.deps.registry.put({
+    await this.deps.registry.put({
       handle: input.handle,
       did: input.did,
       agentCard: input.agentCard,
@@ -150,15 +150,15 @@ export class Relay {
 
   /** Whether `inboxAuth` is the bearer that may drain (and therefore administer)
    * `handle`. The HTTP layer uses this to gate deregistration. */
-  ownsInbox(handle: string, inboxAuth: string): boolean {
+  async ownsInbox(handle: string, inboxAuth: string): Promise<boolean> {
     return this.credentials.handleForInboxAuth(inboxAuth) === handle
   }
 
   /** Deregister a handle (auth'd by its inboxAuth at the HTTP layer). Revokes its
    * credentials and removes the registration. Returns whether it existed. */
-  deregister(handle: string): boolean {
+  async deregister(handle: string): Promise<boolean> {
     this.credentials.revoke(handle)
-    const existed = this.deps.registry.remove(handle)
+    const existed = await this.deps.registry.remove(handle)
     if (existed) {
       this.deps.logger.log("info", "deregistered", { handle, decision: "deregistered" })
     }
@@ -173,8 +173,8 @@ export class Relay {
    * handle's registered DID (a sender can't smuggle a blob sealed to X into Y's
    * queue), (5) the per-handle quota + bound. Every failure is a DENIAL. The relay
    * NEVER reads the sealed content. */
-  enqueue(input: EnqueueInput): { ok: true; queueId: string } | { ok: false; error: EnqueueError } {
-    const reg = this.deps.registry.getByHandle(input.handle)
+  async enqueue(input: EnqueueInput): Promise<{ ok: true; queueId: string } | { ok: false; error: EnqueueError }> {
+    const reg = await this.deps.registry.getByHandle(input.handle)
     if (!reg) {
       return { ok: false, error: "unknown_handle" }
     }
@@ -205,7 +205,7 @@ export class Relay {
     const message = input.message as A2AMessage
     const sizeBytes = messageSizeBytes(message)
     const now = this.deps.clock.now()
-    const result = this.deps.inbox.enqueue({
+    const result = await this.deps.inbox.enqueue({
       handle: input.handle,
       message,
       enqueuedAt: now,
@@ -226,24 +226,24 @@ export class Relay {
   /** Drain a handle's queued opaque messages (A2A tasks/list-style). Auth'd by the
    * inboxAuth bearer (which must resolve to THIS handle). Expired messages are not
    * returned (and get dropped). The returned messages are still ciphertext. */
-  pull(handle: string, inboxAuth: string): { ok: true; messages: QueuedMessage[] } | { ok: false; error: InboxError } {
+  async pull(handle: string, inboxAuth: string): Promise<{ ok: true; messages: QueuedMessage[] } | { ok: false; error: InboxError }> {
     if (this.credentials.handleForInboxAuth(inboxAuth) !== handle) {
       this.deps.logger.log("warn", "pull_rejected", { handle, reason: "bad_inbox_auth" })
       return { ok: false, error: "bad_inbox_auth" }
     }
-    const messages = this.deps.inbox.list(handle, this.deps.clock.now())
+    const messages = await this.deps.inbox.list(handle, this.deps.clock.now())
     this.deps.logger.log("info", "pulled", { handle, count: messages.length, decision: "pulled" })
     return { ok: true, messages }
   }
 
   /** Ack (delete) a delivered message by queueId. Auth'd by the inboxAuth bearer.
    * Returns whether the message existed (idempotent — a re-ack is harmless). */
-  ack(handle: string, inboxAuth: string, queueId: string): { ok: true; existed: boolean } | { ok: false; error: InboxError } {
+  async ack(handle: string, inboxAuth: string, queueId: string): Promise<{ ok: true; existed: boolean } | { ok: false; error: InboxError }> {
     if (this.credentials.handleForInboxAuth(inboxAuth) !== handle) {
       this.deps.logger.log("warn", "ack_rejected", { handle, reason: "bad_inbox_auth" })
       return { ok: false, error: "bad_inbox_auth" }
     }
-    const existed = this.deps.inbox.ack(handle, queueId)
+    const existed = await this.deps.inbox.ack(handle, queueId)
     return { ok: true, existed }
   }
 
@@ -252,15 +252,15 @@ export class Relay {
   /** Directory lookup by handle. Returns the registrant's PUBLIC card + handle +
    * pinned keyAgreement pubkey, or null. Gating (the directory credential) is
    * enforced at the HTTP layer — there is no list-ALL surface. */
-  lookupByHandle(handle: string): { agentCard: PublicAgentCard; handle: string; keyAgreementPubKey?: string } | null {
-    const reg = this.deps.registry.getByHandle(handle)
+  async lookupByHandle(handle: string): Promise<{ agentCard: PublicAgentCard; handle: string; keyAgreementPubKey?: string } | null> {
+    const reg = await this.deps.registry.getByHandle(handle)
     if (!reg) return null
     return { agentCard: reg.agentCard, handle: reg.handle, keyAgreementPubKey: reg.keyAgreementPubKey }
   }
 
   /** Directory lookup by DID. */
-  lookupByDid(did: string): { agentCard: PublicAgentCard; handle: string; keyAgreementPubKey?: string } | null {
-    const reg = this.deps.registry.getByDid(did)
+  async lookupByDid(did: string): Promise<{ agentCard: PublicAgentCard; handle: string; keyAgreementPubKey?: string } | null> {
+    const reg = await this.deps.registry.getByDid(did)
     if (!reg) return null
     return { agentCard: reg.agentCard, handle: reg.handle, keyAgreementPubKey: reg.keyAgreementPubKey }
   }
@@ -269,8 +269,8 @@ export class Relay {
 
   /** Sweep expired messages across all inboxes (a scheduled DoS-hygiene task).
    * Returns the count dropped. Dropping is always safe. */
-  sweepExpired(): number {
-    const dropped = this.deps.inbox.dropExpired(this.deps.clock.now())
+  async sweepExpired(): Promise<number> {
+    const dropped = await this.deps.inbox.dropExpired(this.deps.clock.now())
     if (dropped > 0) {
       this.deps.logger.log("info", "swept_expired", { count: dropped, decision: "swept" })
     }

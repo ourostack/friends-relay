@@ -71,8 +71,9 @@ function registerStatus(error: string): number {
   }
 }
 
-/** The pure router: (config, relay, request) → response. No sockets. */
-export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): RelayResponse {
+/** The pure router: (config, relay, request) → response. No sockets. Async because
+ * the relay core is async (its storage seam is). */
+export async function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Promise<RelayResponse> {
   // ── liveness ──
   if (req.method === "GET" && req.path === "/healthz") {
     return { status: 200, body: { ok: true } }
@@ -92,13 +93,13 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
     if (uses === null) {
       return { status: 400, body: { error: "bad_request" } }
     }
-    return { status: 200, body: { inviteToken: relay.issueInvite(uses) } }
+    return { status: 200, body: { inviteToken: await relay.issueInvite(uses) } }
   }
 
   // ── register (invite-gated) ──
   if (req.method === "POST" && req.path === "/register") {
     const body = (req.body ?? {}) as Record<string, unknown>
-    const result = relay.register({
+    const result = await relay.register({
       handle: typeof body.handle === "string" ? body.handle : "",
       did: typeof body.did === "string" ? body.did : "",
       agentCard: (body.agentCard ?? null) as never,
@@ -117,10 +118,10 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
     const handle = decodeURIComponent(deregMatch[1])
     // `ownsInbox` passing means the credential is bound to a live registration, so
     // `deregister` always removes it (returns true) — no 404 path is reachable here.
-    if (!req.bearer || !relay.ownsInbox(handle, req.bearer)) {
+    if (!req.bearer || !(await relay.ownsInbox(handle, req.bearer))) {
       return { status: 401, body: { error: "unauthorized" } }
     }
-    relay.deregister(handle)
+    await relay.deregister(handle)
     return { status: 200, body: { ok: true } }
   }
 
@@ -129,7 +130,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
   if (req.method === "POST" && a2aMatch) {
     const handle = decodeURIComponent(a2aMatch[1])
     const sendCredential = req.bearer ?? ""
-    const result = relay.enqueue({ handle, sendCredential, message: req.body })
+    const result = await relay.enqueue({ handle, sendCredential, message: req.body })
     if (!result.ok) {
       return { status: enqueueStatus(result.error), body: { error: result.error } }
     }
@@ -141,7 +142,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
   const pullMatch = /^\/inbox\/([^/]+)$/.exec(req.path)
   if (req.method === "GET" && pullMatch) {
     const handle = decodeURIComponent(pullMatch[1])
-    const result = relay.pull(handle, req.bearer ?? "")
+    const result = await relay.pull(handle, req.bearer ?? "")
     if (!result.ok) {
       return { status: 401, body: { error: result.error } }
     }
@@ -153,7 +154,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
   if (req.method === "POST" && ackMatch) {
     const handle = decodeURIComponent(ackMatch[1])
     const queueId = decodeURIComponent(ackMatch[2])
-    const result = relay.ack(handle, req.bearer ?? "", queueId)
+    const result = await relay.ack(handle, req.bearer ?? "", queueId)
     if (!result.ok) {
       return { status: 401, body: { error: result.error } }
     }
@@ -167,7 +168,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
       return { status: 401, body: { error: "unauthorized" } }
     }
     const handle = decodeURIComponent(dirHandleMatch[1])
-    const entry = relay.lookupByHandle(handle)
+    const entry = await relay.lookupByHandle(handle)
     return entry ? { status: 200, body: entry } : JSON_404
   }
 
@@ -178,7 +179,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
       return { status: 401, body: { error: "unauthorized" } }
     }
     const did = decodeURIComponent(dirDidMatch[1])
-    const entry = relay.lookupByDid(did)
+    const entry = await relay.lookupByDid(did)
     return entry ? { status: 200, body: entry } : JSON_404
   }
 
@@ -226,29 +227,31 @@ export function createServer(config: RelayConfig, relay: Relay): Server {
     const chunks: Buffer[] = []
     req.on("data", (c: Buffer) => chunks.push(c))
     req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8")
-      let body: unknown
-      if (raw.length > 0) {
-        try {
-          body = JSON.parse(raw)
-        } catch {
-          res.writeHead(400, { "content-type": "application/json" })
-          res.end(JSON.stringify({ error: "bad_json" }))
-          return
+      void (async () => {
+        const raw = Buffer.concat(chunks).toString("utf8")
+        let body: unknown
+        if (raw.length > 0) {
+          try {
+            body = JSON.parse(raw)
+          } catch {
+            res.writeHead(400, { "content-type": "application/json" })
+            res.end(JSON.stringify({ error: "bad_json" }))
+            return
+          }
         }
-      }
-      const response = handle(
-        config,
-        relay,
-        toRelayRequest({
-          method: req.method,
-          url: req.url,
-          headers: req.headers as Record<string, string | undefined>,
-          body,
-        }),
-      )
-      res.writeHead(response.status, { "content-type": "application/json" })
-      res.end(JSON.stringify(response.body))
+        const response = await handle(
+          config,
+          relay,
+          toRelayRequest({
+            method: req.method,
+            url: req.url,
+            headers: req.headers as Record<string, string | undefined>,
+            body,
+          }),
+        )
+        res.writeHead(response.status, { "content-type": "application/json" })
+        res.end(JSON.stringify(response.body))
+      })()
     })
   })
 }
