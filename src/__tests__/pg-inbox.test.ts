@@ -152,3 +152,60 @@ describe("PgInboxStore — bounded queue over pg-mem", () => {
     expect(listed2.map((m) => m.message.parts[0].data.sealed.ct)).toEqual(["first", "second", "third"])
   })
 })
+
+// The same plaintext substrings the interop content-blind assertion guards against,
+// asserted here against the RAW persisted Postgres row.
+const SUBJECT_JOIN_KEY = "teams:proof-subject-xyz"
+const SECRET_NOTE = "super-secret-note-do-not-leak"
+
+/** A sealed A2A message mirroring what the real a2a-client emits: ONLY the routing
+ * recipientDid + the opaque sealed blob. The ciphertext is base64 noise here; the
+ * point is the persisted row must carry NOTHING but this opaque shape. */
+function sealedMsg(recipientDid = "did:key:zB"): A2AMessage {
+  return {
+    messageId: "m-seal",
+    role: "agent",
+    parts: [{ kind: "data", data: { v: 1, sealed: { v: 1, ePk: "ePk-b64", n: "nonce-b64", ct: "Y2lwaGVydGV4dA==" }, recipientDid } }],
+  }
+}
+
+describe("PgInboxStore — content-blind structural invariant (Postgres)", () => {
+  it("persists ONLY the opaque blob + routing DID; no plaintext, no ciphertext index/column", async () => {
+    const { inbox, pool } = await setup()
+    await inbox.enqueue({ handle: "B-opaque-handle", message: sealedMsg(), enqueuedAt: 0, expiresAt: TTL, sizeBytes: 100 })
+
+    // Read the RAW persisted row directly (not via the adapter), exactly as a db
+    // operator / backup / telemetry pipeline would see it.
+    const raw = await pool.query(`select handle, queue_id, message, enqueued_at, expires_at, size_bytes, seq from inbox`, [])
+    expect(raw.rows).toHaveLength(1)
+    const row = raw.rows[0] as { handle: string; message: A2AMessage; [k: string]: unknown }
+
+    // (a) The stored message jsonb round-trips to EXACTLY {v, sealed:{v,ePk,n,ct}, recipientDid}.
+    expect(Object.keys(row.message).sort()).toEqual(["parts", "messageId", "role"].sort())
+    const data = row.message.parts[0].data
+    expect(Object.keys(data).sort()).toEqual(["recipientDid", "sealed", "v"])
+    expect(Object.keys(data.sealed).sort()).toEqual(["ct", "ePk", "n", "v"])
+    expect(data.recipientDid).toBe("did:key:zB")
+
+    // No plaintext leaks anywhere in the serialized row (the whole row, not just message).
+    const rowBytes = JSON.stringify(row)
+    expect(rowBytes.includes(SUBJECT_JOIN_KEY)).toBe(false)
+    expect(rowBytes.includes(SECRET_NOTE)).toBe(false)
+    expect(rowBytes.includes("profile_share")).toBe(false)
+
+    // (b) The table has NO ciphertext column (and therefore no ciphertext index can
+    // exist — an index can only reference an existing column). The only columns are
+    // the opaque `message` blob + routing `handle` + accounting; there is no `ct`,
+    // no decoded-ciphertext column, and no `recipient_did`. (pg-mem does not
+    // implement pg_indexes, but column-absence makes a ciphertext index impossible,
+    // and the schema DDL itself indexes only (handle, expires_at) + the queue_id PK.)
+    const cols = await pool.query(
+      "select column_name from information_schema.columns where table_name='inbox' order by column_name",
+      [],
+    )
+    const colNames = (cols.rows as { column_name: string }[]).map((c) => c.column_name)
+    expect(colNames).toEqual(["enqueued_at", "expires_at", "handle", "message", "queue_id", "seq", "size_bytes"])
+    expect(colNames).not.toContain("ct")
+    expect(colNames).not.toContain("recipient_did")
+  })
+})
