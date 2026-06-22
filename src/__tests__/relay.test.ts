@@ -48,9 +48,9 @@ function opaque(recipientDid = "did:key:zRecipient", ct = "cipher", id = "m1"): 
 }
 
 /** Register a handle through the relay, returning its grant credentials. */
-function register(relay: Relay, handle = "h", did = "did:key:zRecipient") {
-  const invite = relay.issueInvite()
-  const r = relay.register({ handle, did, agentCard: { ...CARD, did }, inviteToken: invite })
+async function register(relay: Relay, handle = "h", did = "did:key:zRecipient") {
+  const invite = await relay.issueInvite()
+  const r = await relay.register({ handle, did, agentCard: { ...CARD, did }, inviteToken: invite })
   if (!r.ok) throw new Error(`register failed: ${r.error}`)
   return r.grant
 }
@@ -66,10 +66,10 @@ describe("Relay.agentCard", () => {
 })
 
 describe("Relay.register — invite-gated (closed by default)", () => {
-  it("registers with a valid invite and returns rotating credentials", () => {
+  it("registers with a valid invite and returns rotating credentials", async () => {
     const { relay } = makeRelay()
-    const invite = relay.issueInvite()
-    const r = relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: invite })
+    const invite = await relay.issueInvite()
+    const r = await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: invite })
     expect(r.ok).toBe(true)
     if (r.ok) {
       expect(r.grant.handle).toBe("h")
@@ -80,120 +80,120 @@ describe("Relay.register — invite-gated (closed by default)", () => {
     }
   })
 
-  it("REJECTS registration with no invite (closed membership — no open signup)", () => {
+  it("REJECTS registration with no invite (closed membership — no open signup)", async () => {
     const { relay, logger } = makeRelay()
-    const r = relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD })
+    const r = await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD })
     expect(r).toEqual({ ok: false, error: "invite_required" })
     expect(logger.entries.some((e) => e.fields.reason === "invite_required")).toBe(true)
   })
 
-  it("REJECTS registration with an unknown/used invite", () => {
+  it("REJECTS registration with an unknown/used invite", async () => {
     const { relay } = makeRelay()
-    const r = relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: "bogus" })
+    const r = await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: "bogus" })
     expect(r).toEqual({ ok: false, error: "invite_invalid" })
   })
 
-  it("a single-use invite cannot register twice", () => {
+  it("a single-use invite cannot register twice", async () => {
     const { relay } = makeRelay()
-    const invite = relay.issueInvite()
-    expect(relay.register({ handle: "h1", did: "did:key:zA", agentCard: { ...CARD, did: "did:key:zA" }, inviteToken: invite }).ok).toBe(true)
-    expect(relay.register({ handle: "h2", did: "did:key:zB", agentCard: { ...CARD, did: "did:key:zB" }, inviteToken: invite }).ok).toBe(false)
+    const invite = await relay.issueInvite()
+    expect((await relay.register({ handle: "h1", did: "did:key:zA", agentCard: { ...CARD, did: "did:key:zA" }, inviteToken: invite })).ok).toBe(true)
+    expect((await relay.register({ handle: "h2", did: "did:key:zB", agentCard: { ...CARD, did: "did:key:zB" }, inviteToken: invite })).ok).toBe(false)
   })
 
-  it("rejects a bad_request (missing handle/did/card)", () => {
+  it("rejects a bad_request (missing handle/did/card)", async () => {
     const { relay } = makeRelay()
-    expect(relay.register({ handle: "", did: "d", agentCard: CARD, inviteToken: "x" })).toEqual({ ok: false, error: "bad_request" })
-    expect(relay.register({ handle: "h", did: "", agentCard: CARD, inviteToken: "x" })).toEqual({ ok: false, error: "bad_request" })
-    expect(relay.register({ handle: "h", did: "d", agentCard: null as never, inviteToken: "x" })).toEqual({ ok: false, error: "bad_request" })
+    expect(await relay.register({ handle: "", did: "d", agentCard: CARD, inviteToken: "x" })).toEqual({ ok: false, error: "bad_request" })
+    expect(await relay.register({ handle: "h", did: "", agentCard: CARD, inviteToken: "x" })).toEqual({ ok: false, error: "bad_request" })
+    expect(await relay.register({ handle: "h", did: "d", agentCard: null as never, inviteToken: "x" })).toEqual({ ok: false, error: "bad_request" })
   })
 
-  it("OPEN policy registers with no invite", () => {
+  it("OPEN policy registers with no invite", async () => {
     const { relay } = makeRelay(baseConfig({ invitePolicy: "open", adminCredential: undefined }))
-    const r = relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD })
+    const r = await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD })
     expect(r.ok).toBe(true)
   })
 
-  it("re-registration ROTATES credentials (the old send credential stops working)", () => {
+  it("re-registration ROTATES credentials (the old send credential stops working)", async () => {
     const { relay } = makeRelay()
-    const first = register(relay, "h")
+    const first = await register(relay, "h")
     // Send works with the first credential.
-    expect(relay.enqueue({ handle: "h", sendCredential: first.sendCredential, message: opaque() }).ok).toBe(true)
+    expect((await relay.enqueue({ handle: "h", sendCredential: first.sendCredential, message: opaque() })).ok).toBe(true)
     // Re-register (rotate).
-    const second = register(relay, "h")
+    const second = await register(relay, "h")
     expect(second.sendCredential).not.toBe(first.sendCredential)
-    expect(relay.enqueue({ handle: "h", sendCredential: first.sendCredential, message: opaque(undefined, undefined, "m2") })).toEqual({ ok: false, error: "bad_send_credential" })
-    expect(relay.enqueue({ handle: "h", sendCredential: second.sendCredential, message: opaque(undefined, undefined, "m3") }).ok).toBe(true)
+    expect(await relay.enqueue({ handle: "h", sendCredential: first.sendCredential, message: opaque(undefined, undefined, "m2") })).toEqual({ ok: false, error: "bad_send_credential" })
+    expect((await relay.enqueue({ handle: "h", sendCredential: second.sendCredential, message: opaque(undefined, undefined, "m3") })).ok).toBe(true)
   })
 })
 
 describe("Relay.enqueue — store-and-forward of CIPHERTEXT, abuse-resistant", () => {
-  it("enqueues a valid opaque message", () => {
+  it("enqueues a valid opaque message", async () => {
     const { relay, logger } = makeRelay()
-    const grant = register(relay)
-    const r = relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
+    const grant = await register(relay)
+    const r = await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
     expect(r.ok).toBe(true)
     expect(logger.entries.some((e) => e.event === "enqueued")).toBe(true)
   })
 
-  it("rejects an unknown handle", () => {
+  it("rejects an unknown handle", async () => {
     const { relay } = makeRelay()
-    expect(relay.enqueue({ handle: "nope", sendCredential: "x", message: opaque() })).toEqual({ ok: false, error: "unknown_handle" })
+    expect(await relay.enqueue({ handle: "nope", sendCredential: "x", message: opaque() })).toEqual({ ok: false, error: "unknown_handle" })
   })
 
-  it("rejects a bad send credential", () => {
+  it("rejects a bad send credential", async () => {
     const { relay } = makeRelay()
-    register(relay)
-    expect(relay.enqueue({ handle: "h", sendCredential: "wrong", message: opaque() })).toEqual({ ok: false, error: "bad_send_credential" })
+    await register(relay)
+    expect(await relay.enqueue({ handle: "h", sendCredential: "wrong", message: opaque() })).toEqual({ ok: false, error: "bad_send_credential" })
   })
 
-  it("RATE-LIMITS excess sends on the send credential", () => {
+  it("RATE-LIMITS excess sends on the send credential", async () => {
     const cfg = baseConfig({ sendRateLimit: { capacity: 2, refillPerSec: 1 } })
     const { relay } = makeRelay(cfg)
-    const grant = register(relay)
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m1") }).ok).toBe(true)
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m2") }).ok).toBe(true)
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m3") })).toEqual({ ok: false, error: "rate_limited" })
+    const grant = await register(relay)
+    expect((await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m1") })).ok).toBe(true)
+    expect((await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m2") })).ok).toBe(true)
+    expect(await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m3") })).toEqual({ ok: false, error: "rate_limited" })
   })
 
-  it("rejects a malformed message (shape validation, never content)", () => {
+  it("rejects a malformed message (shape validation, never content)", async () => {
     const { relay } = makeRelay()
-    const grant = register(relay)
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: { not: "a2a" } })).toEqual({ ok: false, error: "malformed_message" })
+    const grant = await register(relay)
+    expect(await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: { not: "a2a" } })).toEqual({ ok: false, error: "malformed_message" })
   })
 
-  it("rejects a recipient_mismatch (a blob sealed to another DID can't be parked here)", () => {
+  it("rejects a recipient_mismatch (a blob sealed to another DID can't be parked here)", async () => {
     const { relay } = makeRelay()
-    const grant = register(relay) // handle h's registered DID is did:key:zRecipient
-    const r = relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque("did:key:zSomeoneElse") })
+    const grant = await register(relay) // handle h's registered DID is did:key:zRecipient
+    const r = await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque("did:key:zSomeoneElse") })
     expect(r).toEqual({ ok: false, error: "recipient_mismatch" })
   })
 
-  it("DROPS over the per-handle COUNT quota (bounded queue — DoS floor)", () => {
+  it("DROPS over the per-handle COUNT quota (bounded queue — DoS floor)", async () => {
     const cfg = baseConfig({ inboxBounds: { maxMessages: 2, maxBytes: 1_000_000 }, sendRateLimit: { capacity: 100, refillPerSec: 1 } })
     const { relay, logger } = makeRelay(cfg)
-    const grant = register(relay)
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m1") }).ok).toBe(true)
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m2") }).ok).toBe(true)
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m3") })).toEqual({ ok: false, error: "quota_count" })
+    const grant = await register(relay)
+    expect((await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m1") })).ok).toBe(true)
+    expect((await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m2") })).ok).toBe(true)
+    expect(await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m3") })).toEqual({ ok: false, error: "quota_count" })
     expect(logger.entries.some((e) => e.event === "enqueue_dropped" && e.fields.reason === "quota_count")).toBe(true)
   })
 
-  it("DROPS over the per-handle BYTE quota", () => {
+  it("DROPS over the per-handle BYTE quota", async () => {
     const cfg = baseConfig({ inboxBounds: { maxMessages: 100, maxBytes: 200 }, sendRateLimit: { capacity: 100, refillPerSec: 1 } })
     const { relay } = makeRelay(cfg)
-    const grant = register(relay)
+    const grant = await register(relay)
     // A message with a large ct exceeds 200 bytes.
     const big = opaque(undefined, "x".repeat(500))
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: big })).toEqual({ ok: false, error: "quota_bytes" })
+    expect(await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: big })).toEqual({ ok: false, error: "quota_bytes" })
   })
 })
 
 describe("Relay.pull + ack — the NAT-traversal read path (inbox-auth'd)", () => {
-  it("pulls queued opaque messages with the inbox auth", () => {
+  it("pulls queued opaque messages with the inbox auth", async () => {
     const { relay } = makeRelay()
-    const grant = register(relay)
-    relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
-    const r = relay.pull("h", grant.inboxAuth)
+    const grant = await register(relay)
+    await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
+    const r = await relay.pull("h", grant.inboxAuth)
     expect(r.ok).toBe(true)
     if (r.ok) {
       expect(r.messages).toHaveLength(1)
@@ -201,85 +201,85 @@ describe("Relay.pull + ack — the NAT-traversal read path (inbox-auth'd)", () =
     }
   })
 
-  it("rejects a pull with a wrong/empty inbox auth", () => {
+  it("rejects a pull with a wrong/empty inbox auth", async () => {
     const { relay } = makeRelay()
-    register(relay)
-    expect(relay.pull("h", "wrong")).toEqual({ ok: false, error: "bad_inbox_auth" })
-    expect(relay.pull("h", "")).toEqual({ ok: false, error: "bad_inbox_auth" })
+    await register(relay)
+    expect(await relay.pull("h", "wrong")).toEqual({ ok: false, error: "bad_inbox_auth" })
+    expect(await relay.pull("h", "")).toEqual({ ok: false, error: "bad_inbox_auth" })
   })
 
-  it("does not return EXPIRED messages (TTL)", () => {
+  it("does not return EXPIRED messages (TTL)", async () => {
     const { relay, clock } = makeRelay(baseConfig({ messageTtlMs: 500 }))
-    const grant = register(relay)
-    relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
+    const grant = await register(relay)
+    await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
     clock.advance(600)
-    const r = relay.pull("h", grant.inboxAuth)
+    const r = await relay.pull("h", grant.inboxAuth)
     expect(r.ok && r.messages).toHaveLength(0)
   })
 
-  it("acks a delivered message; a re-ack is harmless", () => {
+  it("acks a delivered message; a re-ack is harmless", async () => {
     const { relay } = makeRelay()
-    const grant = register(relay)
-    const enq = relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
+    const grant = await register(relay)
+    const enq = await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
     const queueId = enq.ok ? enq.queueId : ""
-    const a1 = relay.ack("h", grant.inboxAuth, queueId)
+    const a1 = await relay.ack("h", grant.inboxAuth, queueId)
     expect(a1).toEqual({ ok: true, existed: true })
-    const a2 = relay.ack("h", grant.inboxAuth, queueId)
+    const a2 = await relay.ack("h", grant.inboxAuth, queueId)
     expect(a2).toEqual({ ok: true, existed: false })
   })
 
-  it("rejects an ack with a wrong inbox auth", () => {
+  it("rejects an ack with a wrong inbox auth", async () => {
     const { relay } = makeRelay()
-    register(relay)
-    expect(relay.ack("h", "wrong", "q1")).toEqual({ ok: false, error: "bad_inbox_auth" })
+    await register(relay)
+    expect(await relay.ack("h", "wrong", "q1")).toEqual({ ok: false, error: "bad_inbox_auth" })
   })
 
-  it("ownsInbox reflects the inbox-auth → handle binding", () => {
+  it("ownsInbox reflects the inbox-auth → handle binding", async () => {
     const { relay } = makeRelay()
-    const grant = register(relay)
-    expect(relay.ownsInbox("h", grant.inboxAuth)).toBe(true)
-    expect(relay.ownsInbox("h", "wrong")).toBe(false)
+    const grant = await register(relay)
+    expect(await relay.ownsInbox("h", grant.inboxAuth)).toBe(true)
+    expect(await relay.ownsInbox("h", "wrong")).toBe(false)
   })
 })
 
 describe("Relay.deregister", () => {
-  it("deregisters a handle, revoking its credentials", () => {
+  it("deregisters a handle, revoking its credentials", async () => {
     const { relay } = makeRelay()
-    const grant = register(relay)
-    expect(relay.deregister("h")).toBe(true)
+    const grant = await register(relay)
+    expect(await relay.deregister("h")).toBe(true)
     // Credentials revoked: send + pull now fail.
-    expect(relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })).toEqual({ ok: false, error: "unknown_handle" })
-    expect(relay.pull("h", grant.inboxAuth)).toEqual({ ok: false, error: "bad_inbox_auth" })
+    expect(await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })).toEqual({ ok: false, error: "unknown_handle" })
+    expect(await relay.pull("h", grant.inboxAuth)).toEqual({ ok: false, error: "bad_inbox_auth" })
   })
 
-  it("deregister of an absent handle → false", () => {
+  it("deregister of an absent handle → false", async () => {
     const { relay } = makeRelay()
-    expect(relay.deregister("absent")).toBe(false)
+    expect(await relay.deregister("absent")).toBe(false)
   })
 })
 
 describe("Relay.directory — gated lookup (anti-harvest, no anon enumeration)", () => {
-  it("looks up by handle and by DID", () => {
+  it("looks up by handle and by DID", async () => {
     const { relay } = makeRelay()
-    register(relay, "h", "did:key:zRecipient")
-    const byHandle = relay.lookupByHandle("h")
+    await register(relay, "h", "did:key:zRecipient")
+    const byHandle = await relay.lookupByHandle("h")
     expect(byHandle?.agentCard.did).toBe("did:key:zRecipient")
     expect(byHandle?.handle).toBe("h")
-    const byDid = relay.lookupByDid("did:key:zRecipient")
+    const byDid = await relay.lookupByDid("did:key:zRecipient")
     expect(byDid?.handle).toBe("h")
   })
 
-  it("returns the pinned keyAgreement pubkey when registered with one", () => {
+  it("returns the pinned keyAgreement pubkey when registered with one", async () => {
     const { relay } = makeRelay()
-    const invite = relay.issueInvite()
-    relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, keyAgreementPubKey: "x25519pub", inviteToken: invite })
-    expect(relay.lookupByHandle("h")?.keyAgreementPubKey).toBe("x25519pub")
+    const invite = await relay.issueInvite()
+    await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, keyAgreementPubKey: "x25519pub", inviteToken: invite })
+    expect((await relay.lookupByHandle("h"))?.keyAgreementPubKey).toBe("x25519pub")
   })
 
-  it("returns null for unknown handle/DID", () => {
+  it("returns null for unknown handle/DID", async () => {
     const { relay } = makeRelay()
-    expect(relay.lookupByHandle("nope")).toBeNull()
-    expect(relay.lookupByDid("did:key:nope")).toBeNull()
+    expect(await relay.lookupByHandle("nope")).toBeNull()
+    expect(await relay.lookupByDid("did:key:nope")).toBeNull()
   })
 })
 
@@ -289,20 +289,20 @@ describe("Relay.sweepExpired — DoS hygiene", () => {
     ctx = makeRelay(baseConfig({ messageTtlMs: 500, sendRateLimit: { capacity: 100, refillPerSec: 1 } }))
   })
 
-  it("drops expired messages and reports the count", () => {
+  it("drops expired messages and reports the count", async () => {
     const { relay, clock } = ctx
-    const grant = register(relay)
-    relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m1") })
-    relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m2") })
+    const grant = await register(relay)
+    await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m1") })
+    await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque(undefined, "c", "m2") })
     clock.advance(600)
-    expect(relay.sweepExpired()).toBe(2)
+    expect(await relay.sweepExpired()).toBe(2)
   })
 
-  it("returns 0 and logs nothing when nothing is expired", () => {
+  it("returns 0 and logs nothing when nothing is expired", async () => {
     const { relay, logger } = ctx
-    const grant = register(relay)
-    relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
-    expect(relay.sweepExpired()).toBe(0)
+    const grant = await register(relay)
+    await relay.enqueue({ handle: "h", sendCredential: grant.sendCredential, message: opaque() })
+    expect(await relay.sweepExpired()).toBe(0)
     expect(logger.entries.some((e) => e.event === "swept_expired")).toBe(false)
   })
 })

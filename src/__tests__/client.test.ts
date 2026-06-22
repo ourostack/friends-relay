@@ -46,7 +46,7 @@ function inProcessFetch(cfg: RelayConfig, relay: Relay): FetchLike {
       headers: {},
       body: init?.body ? JSON.parse(init.body) : undefined,
     }
-    const res = handle(cfg, relay, reqObj)
+    const res = await handle(cfg, relay, reqObj)
     return { status: res.status, json: async () => res.body }
   }
 }

@@ -61,71 +61,71 @@ describe("parseBearer", () => {
 })
 
 describe("HTTP router — liveness + relay card", () => {
-  it("GET /healthz → 200 ok", () => {
+  it("GET /healthz → 200 ok", async () => {
     const { relay, config } = makeRelay()
-    expect(handle(config, relay, req("GET", "/healthz"))).toEqual({ status: 200, body: { ok: true } })
+    expect(await handle(config, relay, req("GET", "/healthz"))).toEqual({ status: 200, body: { ok: true } })
   })
 
-  it("GET /.well-known/agent-card.json → the relay's card", () => {
+  it("GET /.well-known/agent-card.json → the relay's card", async () => {
     const { relay, config } = makeRelay()
-    const res = handle(config, relay, req("GET", "/.well-known/agent-card.json"))
+    const res = await handle(config, relay, req("GET", "/.well-known/agent-card.json"))
     expect(res.status).toBe(200)
     expect((res.body as { did: string }).did).toBe("did:web:relay.test")
   })
 
-  it("unknown route → 404", () => {
+  it("unknown route → 404", async () => {
     const { relay, config } = makeRelay()
-    expect(handle(config, relay, req("GET", "/nope"))).toEqual({ status: 404, body: { error: "not_found" } })
+    expect(await handle(config, relay, req("GET", "/nope"))).toEqual({ status: 404, body: { error: "not_found" } })
   })
 })
 
 describe("HTTP router — admin invites (admin-credential gated)", () => {
-  it("POST /admin/invites with the admin credential → an invite token", () => {
+  it("POST /admin/invites with the admin credential → an invite token", async () => {
     const { relay, config } = makeRelay()
-    const res = handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: {} }))
+    const res = await handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: {} }))
     expect(res.status).toBe(200)
     expect((res.body as { inviteToken: string }).inviteToken).toBeTruthy()
   })
 
-  it("rejects without/with the wrong admin credential", () => {
+  it("rejects without/with the wrong admin credential", async () => {
     const { relay, config } = makeRelay()
-    expect(handle(config, relay, req("POST", "/admin/invites", { body: {} })).status).toBe(401)
-    expect(handle(config, relay, req("POST", "/admin/invites", { bearer: "wrong", body: {} })).status).toBe(401)
+    expect((await handle(config, relay, req("POST", "/admin/invites", { body: {} }))).status).toBe(401)
+    expect((await handle(config, relay, req("POST", "/admin/invites", { bearer: "wrong", body: {} }))).status).toBe(401)
   })
 
-  it("honors a uses count and rejects an invalid one", () => {
+  it("honors a uses count and rejects an invalid one", async () => {
     const { relay, config } = makeRelay()
-    expect(handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: { uses: 3 } })).status).toBe(200)
-    expect(handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: { uses: 0 } })).status).toBe(400)
-    expect(handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: { uses: "x" } })).status).toBe(400)
+    expect((await handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: { uses: 3 } }))).status).toBe(200)
+    expect((await handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: { uses: 0 } }))).status).toBe(400)
+    expect((await handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: { uses: "x" } }))).status).toBe(400)
   })
 
-  it("defaults uses to 1 when the body is non-object", () => {
+  it("defaults uses to 1 when the body is non-object", async () => {
     const { relay, config } = makeRelay()
-    const res = handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: "not-an-object" }))
+    const res = await handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: "not-an-object" }))
     expect(res.status).toBe(200)
   })
 
-  it("an open-policy relay with no admin credential cannot issue invites", () => {
+  it("an open-policy relay with no admin credential cannot issue invites", async () => {
     const { relay, config } = makeRelay(baseConfig({ invitePolicy: "open", adminCredential: undefined }))
-    expect(handle(config, relay, req("POST", "/admin/invites", { bearer: "anything", body: {} })).status).toBe(401)
+    expect((await handle(config, relay, req("POST", "/admin/invites", { bearer: "anything", body: {} }))).status).toBe(401)
   })
 })
 
 /** Helper: mint an invite + register a handle via the router, returning the grant. */
-function registerViaHttp(relay: Relay, config: RelayConfig, handleName = "h", did = "did:key:zRecipient") {
-  const inviteRes = handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: {} }))
+async function registerViaHttp(relay: Relay, config: RelayConfig, handleName = "h", did = "did:key:zRecipient") {
+  const inviteRes = await handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: {} }))
   const inviteToken = (inviteRes.body as { inviteToken: string }).inviteToken
-  const regRes = handle(config, relay, req("POST", "/register", { body: { handle: handleName, did, agentCard: { ...CARD, did }, inviteToken } }))
+  const regRes = await handle(config, relay, req("POST", "/register", { body: { handle: handleName, did, agentCard: { ...CARD, did }, inviteToken } }))
   return regRes.body as { handle: string; inboxAuth: string; sendCredential: string }
 }
 
 describe("HTTP router — register / deregister", () => {
-  it("POST /register with a valid invite → grant (+relayCard)", () => {
+  it("POST /register with a valid invite → grant (+relayCard)", async () => {
     const { relay, config } = makeRelay()
-    const inviteRes = handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: {} }))
+    const inviteRes = await handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: {} }))
     const inviteToken = (inviteRes.body as { inviteToken: string }).inviteToken
-    const res = handle(config, relay, req("POST", "/register", { body: { handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken } }))
+    const res = await handle(config, relay, req("POST", "/register", { body: { handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken } }))
     expect(res.status).toBe(200)
     const grant = res.body as { handle: string; inboxAuth: string; sendCredential: string; relayCard: { did: string } }
     expect(grant.handle).toBe("h")
@@ -133,141 +133,141 @@ describe("HTTP router — register / deregister", () => {
     expect(grant.relayCard.did).toBe("did:web:relay.test")
   })
 
-  it("POST /register without an invite → 403 invite_required", () => {
+  it("POST /register without an invite → 403 invite_required", async () => {
     const { relay, config } = makeRelay()
-    const res = handle(config, relay, req("POST", "/register", { body: { handle: "h", did: "did:key:zRecipient", agentCard: CARD } }))
+    const res = await handle(config, relay, req("POST", "/register", { body: { handle: "h", did: "did:key:zRecipient", agentCard: CARD } }))
     expect(res.status).toBe(403)
     expect((res.body as { error: string }).error).toBe("invite_required")
   })
 
-  it("POST /register with an invalid invite → 403 invite_invalid", () => {
+  it("POST /register with an invalid invite → 403 invite_invalid", async () => {
     const { relay, config } = makeRelay()
-    const res = handle(config, relay, req("POST", "/register", { body: { handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: "bogus" } }))
+    const res = await handle(config, relay, req("POST", "/register", { body: { handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: "bogus" } }))
     expect(res.status).toBe(403)
     expect((res.body as { error: string }).error).toBe("invite_invalid")
   })
 
-  it("POST /register with a bad body → 400 bad_request", () => {
+  it("POST /register with a bad body → 400 bad_request", async () => {
     const { relay, config } = makeRelay()
-    const inviteRes = handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: {} }))
+    const inviteRes = await handle(config, relay, req("POST", "/admin/invites", { bearer: "admin-secret", body: {} }))
     const inviteToken = (inviteRes.body as { inviteToken: string }).inviteToken
-    const res = handle(config, relay, req("POST", "/register", { body: { did: "d", agentCard: CARD, inviteToken } }))
+    const res = await handle(config, relay, req("POST", "/register", { body: { did: "d", agentCard: CARD, inviteToken } }))
     expect(res.status).toBe(400)
   })
 
-  it("POST /register with no body at all → 400 (empty handle)", () => {
+  it("POST /register with no body at all → 400 (empty handle)", async () => {
     const { relay, config } = makeRelay(baseConfig({ invitePolicy: "open", adminCredential: undefined }))
-    const res = handle(config, relay, req("POST", "/register", {}))
+    const res = await handle(config, relay, req("POST", "/register", {}))
     expect(res.status).toBe(400)
   })
 
-  it("DELETE /register/{handle} with the inbox auth → 200", () => {
+  it("DELETE /register/{handle} with the inbox auth → 200", async () => {
     const { relay, config } = makeRelay()
-    const grant = registerViaHttp(relay, config)
-    const res = handle(config, relay, req("DELETE", "/register/h", { bearer: grant.inboxAuth }))
+    const grant = await registerViaHttp(relay, config)
+    const res = await handle(config, relay, req("DELETE", "/register/h", { bearer: grant.inboxAuth }))
     expect(res).toEqual({ status: 200, body: { ok: true } })
   })
 
-  it("DELETE /register/{handle} without/with a wrong bearer → 401", () => {
+  it("DELETE /register/{handle} without/with a wrong bearer → 401", async () => {
     const { relay, config } = makeRelay()
-    registerViaHttp(relay, config)
-    expect(handle(config, relay, req("DELETE", "/register/h")).status).toBe(401)
-    expect(handle(config, relay, req("DELETE", "/register/h", { bearer: "wrong" })).status).toBe(401)
+    await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("DELETE", "/register/h"))).status).toBe(401)
+    expect((await handle(config, relay, req("DELETE", "/register/h", { bearer: "wrong" }))).status).toBe(401)
   })
 
-  it("DELETE /register/{handle} for an absent (but auth-probed) handle → 404 after a valid bearer for a different handle is rejected", () => {
+  it("DELETE /register/{handle} for an absent (but auth-probed) handle → 404 after a valid bearer for a different handle is rejected", async () => {
     const { relay, config } = makeRelay()
-    const grant = registerViaHttp(relay, config, "h")
+    const grant = await registerViaHttp(relay, config, "h")
     // The bearer is valid for h, not for h2 → ownsInbox(h2, bearer) false → 401.
-    expect(handle(config, relay, req("DELETE", "/register/h2", { bearer: grant.inboxAuth })).status).toBe(401)
+    expect((await handle(config, relay, req("DELETE", "/register/h2", { bearer: grant.inboxAuth }))).status).toBe(401)
   })
 })
 
 describe("HTTP router — A2A forward (enqueue), pull, ack", () => {
-  it("POST /a2a/{handle} enqueues an opaque message → 202 submitted", () => {
+  it("POST /a2a/{handle} enqueues an opaque message → 202 submitted", async () => {
     const { relay, config } = makeRelay()
-    const grant = registerViaHttp(relay, config)
-    const res = handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque() }))
+    const grant = await registerViaHttp(relay, config)
+    const res = await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque() }))
     expect(res.status).toBe(202)
     expect((res.body as { state: string }).state).toBe("submitted")
   })
 
   it.each([
     ["unknown handle → 404", "/a2a/nope", "anything", opaque(), 404],
-  ])("%s", (_label, path, bearer, body, status) => {
+  ])("%s", async (_label, path, bearer, body, status) => {
     const { relay, config } = makeRelay()
-    expect(handle(config, relay, req("POST", path, { bearer, body })).status).toBe(status)
+    expect((await handle(config, relay, req("POST", path as string, { bearer: bearer as string, body }))).status).toBe(status)
   })
 
-  it("bad send credential → 403", () => {
+  it("bad send credential → 403", async () => {
     const { relay, config } = makeRelay()
-    registerViaHttp(relay, config)
-    expect(handle(config, relay, req("POST", "/a2a/h", { bearer: "wrong", body: opaque() })).status).toBe(403)
+    await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("POST", "/a2a/h", { bearer: "wrong", body: opaque() }))).status).toBe(403)
   })
 
-  it("malformed message → 400", () => {
+  it("malformed message → 400", async () => {
     const { relay, config } = makeRelay()
-    const grant = registerViaHttp(relay, config)
-    expect(handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: { not: "a2a" } })).status).toBe(400)
+    const grant = await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: { not: "a2a" } }))).status).toBe(400)
   })
 
-  it("recipient_mismatch → 400", () => {
+  it("recipient_mismatch → 400", async () => {
     const { relay, config } = makeRelay()
-    const grant = registerViaHttp(relay, config)
-    expect(handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque("did:key:zOther") })).status).toBe(400)
+    const grant = await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque("did:key:zOther") }))).status).toBe(400)
   })
 
-  it("rate-limited → 429", () => {
+  it("rate-limited → 429", async () => {
     const { relay, config } = makeRelay(baseConfig({ sendRateLimit: { capacity: 1, refillPerSec: 1 } }))
-    const grant = registerViaHttp(relay, config)
-    expect(handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque(undefined, "c", "m1") })).status).toBe(202)
-    expect(handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque(undefined, "c", "m2") })).status).toBe(429)
+    const grant = await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque(undefined, "c", "m1") }))).status).toBe(202)
+    expect((await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque(undefined, "c", "m2") }))).status).toBe(429)
   })
 
-  it("over quota → 507", () => {
+  it("over quota → 507", async () => {
     const { relay, config } = makeRelay(baseConfig({ inboxBounds: { maxMessages: 1, maxBytes: 1_000_000 } }))
-    const grant = registerViaHttp(relay, config)
-    expect(handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque(undefined, "c", "m1") })).status).toBe(202)
-    expect(handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque(undefined, "c", "m2") })).status).toBe(507)
+    const grant = await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque(undefined, "c", "m1") }))).status).toBe(202)
+    expect((await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque(undefined, "c", "m2") }))).status).toBe(507)
   })
 
-  it("POST /a2a/{handle} with no bearer → 403 (empty send credential)", () => {
+  it("POST /a2a/{handle} with no bearer → 403 (empty send credential)", async () => {
     const { relay, config } = makeRelay()
-    registerViaHttp(relay, config)
-    expect(handle(config, relay, req("POST", "/a2a/h", { body: opaque() })).status).toBe(403)
+    await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("POST", "/a2a/h", { body: opaque() }))).status).toBe(403)
   })
 
-  it("GET /inbox/{handle} pulls with the inbox auth → 200 messages", () => {
+  it("GET /inbox/{handle} pulls with the inbox auth → 200 messages", async () => {
     const { relay, config } = makeRelay()
-    const grant = registerViaHttp(relay, config)
-    handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque() }))
-    const res = handle(config, relay, req("GET", "/inbox/h", { bearer: grant.inboxAuth }))
+    const grant = await registerViaHttp(relay, config)
+    await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque() }))
+    const res = await handle(config, relay, req("GET", "/inbox/h", { bearer: grant.inboxAuth }))
     expect(res.status).toBe(200)
     expect((res.body as { messages: unknown[] }).messages).toHaveLength(1)
   })
 
-  it("GET /inbox/{handle} with wrong/no auth → 401", () => {
+  it("GET /inbox/{handle} with wrong/no auth → 401", async () => {
     const { relay, config } = makeRelay()
-    registerViaHttp(relay, config)
-    expect(handle(config, relay, req("GET", "/inbox/h", { bearer: "wrong" })).status).toBe(401)
-    expect(handle(config, relay, req("GET", "/inbox/h")).status).toBe(401)
+    await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("GET", "/inbox/h", { bearer: "wrong" }))).status).toBe(401)
+    expect((await handle(config, relay, req("GET", "/inbox/h"))).status).toBe(401)
   })
 
-  it("POST /inbox/{handle}/ack/{queueId} acks with the inbox auth", () => {
+  it("POST /inbox/{handle}/ack/{queueId} acks with the inbox auth", async () => {
     const { relay, config } = makeRelay()
-    const grant = registerViaHttp(relay, config)
-    const enq = handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque() }))
+    const grant = await registerViaHttp(relay, config)
+    const enq = await handle(config, relay, req("POST", "/a2a/h", { bearer: grant.sendCredential, body: opaque() }))
     const queueId = (enq.body as { taskId: string }).taskId
-    const res = handle(config, relay, req("POST", `/inbox/h/ack/${queueId}`, { bearer: grant.inboxAuth }))
+    const res = await handle(config, relay, req("POST", `/inbox/h/ack/${queueId}`, { bearer: grant.inboxAuth }))
     expect(res).toEqual({ status: 200, body: { acked: true } })
   })
 
-  it("ack with a wrong/absent auth → 401", () => {
+  it("ack with a wrong/absent auth → 401", async () => {
     const { relay, config } = makeRelay()
-    registerViaHttp(relay, config)
-    expect(handle(config, relay, req("POST", "/inbox/h/ack/q1", { bearer: "wrong" })).status).toBe(401)
+    await registerViaHttp(relay, config)
+    expect((await handle(config, relay, req("POST", "/inbox/h/ack/q1", { bearer: "wrong" }))).status).toBe(401)
     // No bearer at all → the `req.bearer ?? ""` fallback → bad_inbox_auth.
-    expect(handle(config, relay, req("POST", "/inbox/h/ack/q1")).status).toBe(401)
+    expect((await handle(config, relay, req("POST", "/inbox/h/ack/q1"))).status).toBe(401)
   })
 })
 
@@ -286,35 +286,35 @@ describe("toRelayRequest — pure node→RelayRequest build", () => {
 })
 
 describe("HTTP router — directory (gated, anti-harvest)", () => {
-  it("GET /directory/{handle} → the public card (open when no directory credential)", () => {
+  it("GET /directory/{handle} → the public card (open when no directory credential)", async () => {
     const { relay, config } = makeRelay()
-    registerViaHttp(relay, config, "h", "did:key:zRecipient")
-    const res = handle(config, relay, req("GET", "/directory/h"))
+    await registerViaHttp(relay, config, "h", "did:key:zRecipient")
+    const res = await handle(config, relay, req("GET", "/directory/h"))
     expect(res.status).toBe(200)
     expect((res.body as { handle: string }).handle).toBe("h")
   })
 
-  it("GET /directory/by-did/{did} → the public card", () => {
+  it("GET /directory/by-did/{did} → the public card", async () => {
     const { relay, config } = makeRelay()
-    registerViaHttp(relay, config, "h", "did:key:zRecipient")
-    const res = handle(config, relay, req("GET", "/directory/by-did/did:key:zRecipient"))
+    await registerViaHttp(relay, config, "h", "did:key:zRecipient")
+    const res = await handle(config, relay, req("GET", "/directory/by-did/did:key:zRecipient"))
     expect(res.status).toBe(200)
     expect((res.body as { handle: string }).handle).toBe("h")
   })
 
-  it("unknown handle/DID → 404", () => {
+  it("unknown handle/DID → 404", async () => {
     const { relay, config } = makeRelay()
-    expect(handle(config, relay, req("GET", "/directory/nope")).status).toBe(404)
-    expect(handle(config, relay, req("GET", "/directory/by-did/did:key:nope")).status).toBe(404)
+    expect((await handle(config, relay, req("GET", "/directory/nope"))).status).toBe(404)
+    expect((await handle(config, relay, req("GET", "/directory/by-did/did:key:nope"))).status).toBe(404)
   })
 
-  it("when a directory credential is configured, it is REQUIRED (anti-harvest)", () => {
+  it("when a directory credential is configured, it is REQUIRED (anti-harvest)", async () => {
     const { relay, config } = makeRelay(baseConfig({ directoryCredential: "dir-secret" }))
-    registerViaHttp(relay, config, "h", "did:key:zRecipient")
-    expect(handle(config, relay, req("GET", "/directory/h")).status).toBe(401)
-    expect(handle(config, relay, req("GET", "/directory/by-did/did:key:zRecipient")).status).toBe(401)
-    expect(handle(config, relay, req("GET", "/directory/h", { bearer: "dir-secret" })).status).toBe(200)
-    expect(handle(config, relay, req("GET", "/directory/by-did/did:key:zRecipient", { bearer: "dir-secret" })).status).toBe(200)
+    await registerViaHttp(relay, config, "h", "did:key:zRecipient")
+    expect((await handle(config, relay, req("GET", "/directory/h"))).status).toBe(401)
+    expect((await handle(config, relay, req("GET", "/directory/by-did/did:key:zRecipient"))).status).toBe(401)
+    expect((await handle(config, relay, req("GET", "/directory/h", { bearer: "dir-secret" }))).status).toBe(200)
+    expect((await handle(config, relay, req("GET", "/directory/by-did/did:key:zRecipient", { bearer: "dir-secret" }))).status).toBe(200)
   })
 })
 

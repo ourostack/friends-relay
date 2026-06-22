@@ -143,7 +143,7 @@ function inProcessFetch(cfg: RelayConfig, relay: Relay): FetchLike {
       headers: {},
       body: init?.body ? JSON.parse(init.body) : undefined,
     }
-    const res = handle(cfg, relay, reqObj)
+    const res = await handle(cfg, relay, reqObj)
     return { status: res.status, json: async () => res.body }
   }
 }
@@ -228,7 +228,7 @@ describe("INTEROP — the real @ouro.bot/friends/a2a-client through the relay", 
     expect(sendResult.ok && sendResult.rung).toBe("relay")
 
     // ── CONTENT-BLIND ASSERTION — inspect what the relay STORED for B's inbox. ──
-    const stored = inbox.list("B-opaque-handle", 0)
+    const stored = await inbox.list("B-opaque-handle", 0)
     expect(stored).toHaveLength(1)
     const storedBytes = JSON.stringify(stored[0].message)
     // The relay held ONLY ciphertext: no plaintext leaks anywhere in the blob.
@@ -274,7 +274,7 @@ describe("INTEROP — the real @ouro.bot/friends/a2a-client through the relay", 
 
     // B acks → the relay drops it (not a content store).
     expect(await client.ack("B-opaque-handle", bGrant.inboxAuth, pulled[0].queueId)).toBe(true)
-    expect(inbox.list("B-opaque-handle", 0)).toHaveLength(0)
+    expect(await inbox.list("B-opaque-handle", 0)).toHaveLength(0)
   })
 
   it("INVITE-GATING rejects a non-invited agent", async () => {
@@ -368,11 +368,11 @@ describe("INTEROP — the real @ouro.bot/friends/a2a-client through the relay", 
       plaintextEnvelope: profileEnvelope(A.did) as unknown as Record<string, unknown>,
       friendsKind: "profile_share",
     })
-    expect(inbox.list("B-opaque-handle", 0)).toHaveLength(1)
+    expect(await inbox.list("B-opaque-handle", 0)).toHaveLength(1)
     // Advance past the TTL → the message expires + drops; B pulls nothing.
     clock.advance(600)
     expect(await client.pull("B-opaque-handle", bGrant.inboxAuth)).toHaveLength(0)
-    expect(relay_sweep(inbox, 600)).toBeGreaterThanOrEqual(0)
+    expect(await relay_sweep(inbox, 600)).toBeGreaterThanOrEqual(0)
   })
 
   it("REPLAY is handled — a re-delivered blob is skipped by the recipient seen-ledger", async () => {
@@ -422,6 +422,6 @@ describe("INTEROP — the real @ouro.bot/friends/a2a-client through the relay", 
 
 /** Drive a relay-side expiry sweep for the TTL assertion (kept local to avoid
  * coupling the test to the relay's scheduled sweep). */
-function relay_sweep(inbox: MemoryInboxStore, now: number): number {
+function relay_sweep(inbox: MemoryInboxStore, now: number): Promise<number> {
   return inbox.dropExpired(now)
 }
