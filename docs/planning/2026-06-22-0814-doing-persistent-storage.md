@@ -87,6 +87,17 @@ expect(data.recipientDid).toBe(B.did)
 ```
 The Postgres parity assertion (Unit 7) must: enqueue this sealed message via the Postgres inbox adapter, read the raw persisted row, and assert (a) the stored `message` jsonb round-trips to exactly `{v, sealed:{v,ePk,n,ct}, recipientDid}` with none of the plaintext substrings present, and (b) the table indexes only on `(handle, queue_id, expires_at)` + `recipient_did`, never on the ciphertext column.
 
+## Pass-3 validation findings (probed against pg-mem 3.0.14 + pg 8.22.0 — de-risks the adapter SQL)
+Verified in a scratch install (not the repo) that every SQL shape the adapters need is supported by the hermetic harness, so **there is no hermetic-coverage blocker** — the whole adapter surface is reachable under `pg-mem`:
+- **`pg` adapter API**: `import { newDb } from "pg-mem"` → `const { Pool, Client } = newDb().adapters.createPg()`. A `new Pool()` is `pg`-API-compatible (`.query(text, params)` → `{ rows, rowCount }`). This is the exact bootstrap the test units (2a/3a/5a/6a/7/8) should use.
+- **Quota aggregation**: `select count(*)::int, coalesce(sum(size_bytes),0)::int where handle=$1 and expires_at>$2` — works.
+- **Ack**: `delete … where handle=$1 and queue_id=$2 returning queue_id` returns the row + correct `rowCount` — works (drives ack hit/miss).
+- **jsonb opaque round-trip**: a `jsonb` column round-trips to a JS object (`{v,sealed:{…},recipientDid}`) — works (content-blind storage).
+- **Re-registration**: `insert … on conflict (handle) do update set …=excluded.…` — works.
+- **Invite decrement**: `update … set remaining = remaining - 1 … returning remaining` — works **iff spaced** (see Unit 5b gotcha).
+- **Credential rotation + reverse indexes**: unique indexes on `inbox_auth`/`send_credential` + `on conflict (handle) do update` atomically supersede the old pair; old tokens stop resolving (rowCount 0) — works.
+- **Simulated restart mechanism (CONFIRMED — Unit 8 depends on this)**: a **fresh `new Pool()` over the SAME `newDb()` instance retains all rows.** So "restart" = build a `newDb()`, run the relay over adapters using one pool, then construct fresh adapters/a fresh pool over the *same* `newDb()` and assert state survived. No file/socket needed.
+
 ## Env vars the relay will read (for the operator to wire)
 - `RELAY_STORE` — backend selector. `memory` (default, unchanged) or `postgres`. Absent/empty ⇒ `memory`.
 - `DATABASE_URL` — standard Postgres connection string (`postgres://user:pass@host:5432/dbname?sslmode=require`). **Required and validated when `RELAY_STORE=postgres`**; ignored otherwise. Fail-loud at `loadConfig` if `RELAY_STORE=postgres` and `DATABASE_URL` is missing/empty.
@@ -161,7 +172,7 @@ The Postgres parity assertion (Unit 7) must: enqueue this sealed message via the
 **Acceptance**: Tests exist and FAIL.
 
 ### ⬜ Unit 5b: Postgres Invite + Credential adapters — implementation (GREEN)
-**What**: Implement both against the Unit-0 schema. Invite consume = `update invites set remaining=remaining-1 where token=$1 and remaining>=1 returning remaining`, then delete at 0 (single statement or CTE). Credential rotate = `insert … on conflict (handle) do update set inbox_auth=…, send_credential=…` (atomically supersedes the old pair; the unique reverse indexes mean the old tokens no longer resolve). Reverse lookups = `select handle from credentials where inbox_auth=$1` / `where send_credential=$1`.
+**What**: Implement both against the Unit-0 schema. Invite consume = `update invites set remaining = remaining - 1 where token=$1 and remaining >= 1 returning remaining`, then delete at 0 (single statement or CTE). **GOTCHA (verified against pg-mem 3.0.14 in Pass 3): write arithmetic spaced — `remaining - 1`, NOT `remaining-1` — pg-mem's parser rejects the unspaced form** (`Unexpected int token "-1"`). Credential rotate = `insert … on conflict (handle) do update set inbox_auth=excluded.inbox_auth, send_credential=excluded.send_credential` (atomically supersedes the old pair; the unique reverse indexes mean the old tokens no longer resolve — verified). Reverse lookups = `select handle from credentials where inbox_auth=$1` / `where send_credential=$1`.
 **Acceptance**: Unit 5a tests PASS; 100% coverage; no `v8 ignore`.
 
 ### ⬜ Unit 5c: Postgres Invite/Credential adapters — coverage & refactor
@@ -213,3 +224,4 @@ The Postgres parity assertion (Unit 7) must: enqueue this sealed message via the
 - 2026-06-22 08:14 Created from planning doc (Pass 1 first draft). Baked in the 5 resolved answers (Postgres + pure-JS `pg`; two new InviteStore/CredentialStore interfaces; rate-limiter buckets stay ephemeral; replica-moot; `pg-mem` hermetic fake). Validated against HEAD: confirmed the server side is fully synchronous and made the async-seam conversion an explicit foundational Unit 1 ahead of the adapters.
 - 2026-06-22 08:23 Pass 1 committed.
 - 2026-06-22 08:23 Pass 2 (granularity): every feature already split tests→impl→coverage (a/b/c); each sub-unit atomic + one-session + has What/Acceptance. Confirmed Unit 0 (deps + 4-table DDL) is a legitimately-bundled setup unit (DDL is one cohesive deliverable); no further breakdown needed. No structural changes.
+- 2026-06-22 08:23 Pass 3 (validation): read interfaces/memory/relay/security/config/bootstrap/bin/http + store.test.ts at HEAD; confirmed the server side is 100% synchronous (only `client/index.ts` + socket-level tests are async). Probed pg-mem 3.0.14 + pg 8.22.0 in a scratch install: confirmed `newDb().adapters.createPg()` → `{Pool,Client}`, jsonb round-trip, count/coalesce-sum, DELETE…RETURNING+rowCount, ON CONFLICT…DO UPDATE, unique reverse-index rotation supersede, and the fresh-pool-over-same-db restart mechanism. Caught the pg-mem unspaced-arithmetic parser quirk (`remaining-1` rejected) and baked the `remaining - 1` fix + gotcha into Unit 5b. Net: no hermetic-coverage blocker — full adapter surface is reachable under pg-mem. Added a Pass-3 findings block.
