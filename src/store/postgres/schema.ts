@@ -13,9 +13,22 @@
 
 /** The minimal pg `Pool` surface the adapters + migration use. Kept structural (not
  * `import type { Pool } from "pg"`) so the production `pg` Pool AND a `pg-mem` test
- * Pool both satisfy it without coupling the store layer to the driver's class. */
+ * Pool both satisfy it without coupling the store layer to the driver's class.
+ *
+ * `connect()` checks out a dedicated client for a multi-statement TRANSACTION (the
+ * bound-enforcing inbox enqueue runs SERIALIZABLE so concurrent posts to one handle
+ * can't both pass the quota and overshoot). Both the real `pg.Pool` and the pg-mem
+ * Pool implement it. */
 export interface PgPool {
   query(text: string, params?: unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>
+  connect(): Promise<PgPoolClient>
+}
+
+/** A checked-out pooled client (one connection) for a transaction. `release()` returns
+ * it to the pool. The structural subset both `pg`'s `PoolClient` and pg-mem satisfy. */
+export interface PgPoolClient {
+  query(text: string, params?: unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>
+  release(): void
 }
 
 /** The `inbox` queue: opaque ciphertext blobs + accounting only. FIFO order is the
