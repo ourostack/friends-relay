@@ -123,11 +123,11 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **What**: Widen `InboxStore` + `RegistryStore` method signatures in `src/store/interfaces.ts` to return `Promise<…>`. Update the existing suites (`store.test.ts`, `relay.test.ts`, `http.test.ts` router block, `bootstrap.test.ts`, and the interop content-blind direct `inbox.list` call) to `await` the now-async API. Do NOT yet change the implementations.
 **Acceptance**: Tests are updated to `await` and the suite **FAILS to compile / FAILS** (red) because `Memory*`/`Relay`/`handle` still return sync values — confirming the spec is captured.
 
-### ⬜ Unit 1b: Make the storage seam async — implementation (GREEN)
+### ✅ Unit 1b: Make the storage seam async — implementation (GREEN)
 **What**: Make `MemoryInboxStore`/`MemoryRegistryStore` methods `async` (bodies unchanged). Propagate `async`/`await` through `Relay` (`register`/`deregister`/`enqueue`/`pull`/`ack`/`ownsInbox`/`issueInvite`/`lookupByHandle`/`lookupByDid`/`sweepExpired`), `handle()` in `server/http.ts` (now `async`, `await relay.*`), `assembleRelay` (in-memory path stays sync-constructed; return type adjusted as needed), and `bin.ts` (wrap startup in an async IIFE — coverage-excluded). `RateLimiter`/`tokens`/`clock` stay synchronous (not store-backed).
 **Acceptance**: Full suite PASSES (green) again; `typecheck` + `lint` clean; **coverage still 100%**; no behavior change observable at the socket level (the `createServer`/`client`/`interop` socket tests pass unchanged in intent).
 
-### ⬜ Unit 1c: Async seam — coverage & refactor
+### ✅ Unit 1c: Async seam — coverage & refactor
 **What**: Confirm no branch regressed; tidy any awkward `Promise` plumbing; ensure the `EnqueueResult`/error unions are unchanged (only the wrapping `Promise` is new).
 **Acceptance**: 100% coverage on all touched files; suite green; diff is signature-only (no logic drift) for the in-memory path.
 
