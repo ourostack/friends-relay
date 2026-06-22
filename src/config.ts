@@ -12,6 +12,11 @@ import type { RateLimitConfig } from "./security/rate-limit"
  * bounded — never content-filtered). */
 export type InvitePolicy = "closed" | "open"
 
+/** Storage backend selector. `memory` (default) = the in-memory reference backend
+ * (ephemeral — a restart drops state). `postgres` = the durable Postgres backend
+ * (survives restarts), which requires `DATABASE_URL`. */
+export type StoreBackend = "memory" | "postgres"
+
 /** The fully-resolved relay config. */
 export interface RelayConfig {
   /** TCP bind host + port for the HTTP server. */
@@ -38,6 +43,11 @@ export interface RelayConfig {
   messageTtlMs: number
   /** Per-send-credential rate limit. */
   sendRateLimit: RateLimitConfig
+  /** Storage backend selector (env `RELAY_STORE`). Defaults to `memory`. */
+  store: StoreBackend
+  /** Postgres connection string (env `DATABASE_URL`). Present + required only when
+   * `store === "postgres"`; undefined otherwise. */
+  databaseUrl: string | undefined
 }
 
 /** Parse a positive integer env var with a default. Throws on a present-but-invalid
@@ -67,6 +77,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     )
   }
 
+  const { store, databaseUrl } = resolveStore(env)
+
   return {
     bindHost: env.RELAY_BIND_HOST || "0.0.0.0",
     bindPort: intEnv(env, "RELAY_BIND_PORT", 8080),
@@ -86,5 +98,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
       capacity: intEnv(env, "RELAY_SEND_RATE_CAPACITY", 60),
       refillPerSec: intEnv(env, "RELAY_SEND_RATE_REFILL_PER_SEC", 1),
     },
+    store,
+    databaseUrl,
   }
+}
+
+/** Resolve the storage backend + its connection string from env, failing loud on a
+ * misconfiguration (consistent with loadConfig's fail-loud contract): an unrecognized
+ * RELAY_STORE, or postgres selected without a DATABASE_URL. An absent/empty
+ * RELAY_STORE defaults to `memory`; DATABASE_URL is ignored unless postgres. */
+function resolveStore(env: NodeJS.ProcessEnv): { store: StoreBackend; databaseUrl: string | undefined } {
+  const raw = env.RELAY_STORE
+  if (raw === undefined || raw === "" || raw === "memory") {
+    return { store: "memory", databaseUrl: undefined }
+  }
+  if (raw !== "postgres") {
+    throw new Error(`config: RELAY_STORE must be "memory" or "postgres", got ${JSON.stringify(raw)}`)
+  }
+  const databaseUrl = env.DATABASE_URL
+  if (!databaseUrl) {
+    throw new Error("config: DATABASE_URL is required when RELAY_STORE is postgres (the durable backend's connection string)")
+  }
+  return { store: "postgres", databaseUrl }
 }

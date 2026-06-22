@@ -7,7 +7,15 @@
 // queued). This is the DoS floor — no unbounded growth, ever. Dropping is safe
 // because recipient imports are idempotent (a drop is a denial, never corruption).
 
-import type { EnqueueResult, InboxStore, RegistryStore } from "./interfaces"
+import { sha256Hex } from "../security/hash"
+import type {
+  CredentialPair,
+  CredentialStore,
+  EnqueueResult,
+  InboxStore,
+  InviteStore,
+  RegistryStore,
+} from "./interfaces"
 import type { Registration, QueuedMessage, A2AMessage } from "../types"
 
 /** Per-handle inbox bounds. Both are hard caps — exceeding either drops the
@@ -26,13 +34,13 @@ export class MemoryInboxStore implements InboxStore {
 
   constructor(private readonly bounds: InboxBounds) {}
 
-  enqueue(input: {
+  async enqueue(input: {
     handle: string
     message: A2AMessage
     enqueuedAt: number
     expiresAt: number
     sizeBytes: number
-  }): EnqueueResult {
+  }): Promise<EnqueueResult> {
     // Read the live (non-expired) queue so expired entries don't count against the
     // bound (and get dropped as a side effect of pruning).
     const live = this.livePrune(input.handle, input.enqueuedAt)
@@ -58,11 +66,11 @@ export class MemoryInboxStore implements InboxStore {
     return { ok: true, queueId }
   }
 
-  list(handle: string, now: number): QueuedMessage[] {
+  async list(handle: string, now: number): Promise<QueuedMessage[]> {
     return this.livePrune(handle, now).slice()
   }
 
-  ack(handle: string, queueId: string): boolean {
+  async ack(handle: string, queueId: string): Promise<boolean> {
     const q = this.queues.get(handle)
     if (!q) return false
     const idx = q.findIndex((m) => m.queueId === queueId)
@@ -72,7 +80,7 @@ export class MemoryInboxStore implements InboxStore {
     return true
   }
 
-  dropExpired(now: number): number {
+  async dropExpired(now: number): Promise<number> {
     let dropped = 0
     for (const [handle, q] of this.queues) {
       const before = q.length
@@ -87,7 +95,7 @@ export class MemoryInboxStore implements InboxStore {
     return dropped
   }
 
-  depth(handle: string, now: number): number {
+  async depth(handle: string, now: number): Promise<number> {
     return this.livePrune(handle, now).length
   }
 
@@ -112,7 +120,7 @@ export class MemoryRegistryStore implements RegistryStore {
   private readonly byHandle = new Map<string, Registration>()
   private readonly byDid = new Map<string, Registration>()
 
-  put(reg: Registration): void {
+  async put(reg: Registration): Promise<void> {
     // A re-registration under the same handle may carry a new DID binding; clear any
     // stale DID index entry that pointed at this handle before re-indexing.
     const prev = this.byHandle.get(reg.handle)
@@ -123,15 +131,15 @@ export class MemoryRegistryStore implements RegistryStore {
     this.byDid.set(reg.did, reg)
   }
 
-  getByHandle(handle: string): Registration | undefined {
+  async getByHandle(handle: string): Promise<Registration | undefined> {
     return this.byHandle.get(handle)
   }
 
-  getByDid(did: string): Registration | undefined {
+  async getByDid(did: string): Promise<Registration | undefined> {
     return this.byDid.get(did)
   }
 
-  remove(handle: string): boolean {
+  async remove(handle: string): Promise<boolean> {
     const reg = this.byHandle.get(handle)
     if (!reg) return false
     this.byHandle.delete(handle)
@@ -140,5 +148,92 @@ export class MemoryRegistryStore implements RegistryStore {
       this.byDid.delete(reg.did)
     }
     return true
+  }
+}
+
+/** An in-memory InviteStore — pure persistence of token → remaining-use counters.
+ * The single-use / cap ENFORCEMENT lives in InviteManager; this just records the
+ * counter and provides the atomic decrement-or-delete primitive.
+ *
+ * AT REST (RF3): the invite token is a high-entropy bearer secret, so it is keyed by
+ * its SHA-256 digest, never the plaintext — a leak of this map yields no usable token.
+ * Every method hashes the presented token, so the equality lookup is transparent. */
+export class MemoryInviteStore implements InviteStore {
+  private readonly remaining = new Map<string, number>()
+
+  async setRemaining(token: string, remaining: number): Promise<void> {
+    this.remaining.set(sha256Hex(token), remaining)
+  }
+
+  async getRemaining(token: string): Promise<number | undefined> {
+    return this.remaining.get(sha256Hex(token))
+  }
+
+  async decrementOrDelete(token: string): Promise<boolean> {
+    const key = sha256Hex(token)
+    const rec = this.remaining.get(key)
+    if (rec === undefined || rec < 1) return false
+    const next = rec - 1
+    if (next === 0) {
+      this.remaining.delete(key)
+    } else {
+      this.remaining.set(key, next)
+    }
+    return true
+  }
+}
+
+/** An in-memory CredentialStore — pure persistence of handle → current pair plus the
+ * two reverse lookups. The rotation revoke-then-mint SEQUENCING lives in
+ * CredentialManager; this records bindings and atomically supersedes the prior pair
+ * on `setCurrent` (so the old tokens stop resolving even without a preceding delete).
+ *
+ * AT REST (RF3): inboxAuth + sendCredential are high-entropy bearer secrets, so this
+ * store holds only their SHA-256 DIGESTS — the reverse maps are keyed by digest, and
+ * `current` stores the digest pair. A leak of this store yields no usable bearer. The
+ * boundary is uniform: `setCurrent` + the reverse lookups hash the presented plaintext;
+ * `getCurrent` returns the stored DIGEST pair (its only consumer is the rotation revoke
+ * path, which feeds it straight to `deleteFor`); `deleteFor` therefore matches its
+ * input AS-GIVEN (already a digest pair) and does NOT re-hash. */
+export class MemoryCredentialStore implements CredentialStore {
+  private readonly inboxAuthToHandle = new Map<string, string>()
+  private readonly sendCredToHandle = new Map<string, string>()
+  private readonly current = new Map<string, CredentialPair>()
+
+  async setCurrent(handle: string, pair: CredentialPair): Promise<void> {
+    const hashed: CredentialPair = { inboxAuth: sha256Hex(pair.inboxAuth), sendCredential: sha256Hex(pair.sendCredential) }
+    // Atomically supersede any prior pair for this handle (drop its reverse entries).
+    const prev = this.current.get(handle)
+    if (prev) {
+      this.inboxAuthToHandle.delete(prev.inboxAuth)
+      this.sendCredToHandle.delete(prev.sendCredential)
+    }
+    this.inboxAuthToHandle.set(hashed.inboxAuth, handle)
+    this.sendCredToHandle.set(hashed.sendCredential, handle)
+    this.current.set(handle, hashed)
+  }
+
+  async getCurrent(handle: string): Promise<CredentialPair | undefined> {
+    return this.current.get(handle)
+  }
+
+  async deleteFor(handle: string, pair: CredentialPair): Promise<void> {
+    // `pair` is already in stored (digest) form — the production caller passes the
+    // result of `getCurrent`. Only delete if the handle's current pair still matches.
+    const cur = this.current.get(handle)
+    if (!cur || cur.inboxAuth !== pair.inboxAuth || cur.sendCredential !== pair.sendCredential) {
+      return
+    }
+    this.inboxAuthToHandle.delete(pair.inboxAuth)
+    this.sendCredToHandle.delete(pair.sendCredential)
+    this.current.delete(handle)
+  }
+
+  async handleForInboxAuth(inboxAuth: string): Promise<string | null> {
+    return this.inboxAuthToHandle.get(sha256Hex(inboxAuth)) ?? null
+  }
+
+  async handleForSendCredential(sendCredential: string): Promise<string | null> {
+    return this.sendCredToHandle.get(sha256Hex(sendCredential)) ?? null
   }
 }

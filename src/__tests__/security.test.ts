@@ -5,6 +5,7 @@ import { CredentialManager } from "../security/credentials"
 import { InviteManager } from "../security/invites"
 import { RateLimiter } from "../security/rate-limit"
 import { cryptoTokenSource, SequenceTokenSource } from "../security/tokens"
+import { MemoryCredentialStore, MemoryInviteStore } from "../store/memory"
 
 describe("tokens", () => {
   it("cryptoTokenSource mints distinct 64-hex-char tokens", () => {
@@ -22,75 +23,75 @@ describe("tokens", () => {
   })
 })
 
-describe("InviteManager — closed membership", () => {
-  it("issues a single-use invite that consumes once then fails", () => {
-    const inv = new InviteManager(new SequenceTokenSource("inv"))
-    const t = inv.issue()
+describe("InviteManager — closed membership (logic over an InviteStore)", () => {
+  it("issues a single-use invite that consumes once then fails", async () => {
+    const inv = new InviteManager(new SequenceTokenSource("inv"), new MemoryInviteStore())
+    const t = await inv.issue()
     expect(t).toBe("inv-1")
-    expect(inv.consume(t)).toBe(true)
-    expect(inv.consume(t)).toBe(false) // reuse rejected
+    expect(await inv.consume(t)).toBe(true)
+    expect(await inv.consume(t)).toBe(false) // reuse rejected
   })
 
-  it("rejects an unknown token", () => {
-    const inv = new InviteManager(new SequenceTokenSource())
-    expect(inv.consume("never-issued")).toBe(false)
+  it("rejects an unknown token", async () => {
+    const inv = new InviteManager(new SequenceTokenSource(), new MemoryInviteStore())
+    expect(await inv.consume("never-issued")).toBe(false)
   })
 
-  it("honors a multi-use cap", () => {
-    const inv = new InviteManager(new SequenceTokenSource("inv"))
-    const t = inv.issue(2)
-    expect(inv.consume(t)).toBe(true)
-    expect(inv.consume(t)).toBe(true)
-    expect(inv.consume(t)).toBe(false) // exhausted
+  it("honors a multi-use cap", async () => {
+    const inv = new InviteManager(new SequenceTokenSource("inv"), new MemoryInviteStore())
+    const t = await inv.issue(2)
+    expect(await inv.consume(t)).toBe(true)
+    expect(await inv.consume(t)).toBe(true)
+    expect(await inv.consume(t)).toBe(false) // exhausted
   })
 
-  it("throws on a non-positive use cap", () => {
-    const inv = new InviteManager(new SequenceTokenSource())
-    expect(() => inv.issue(0)).toThrow(/uses must be >= 1/)
+  it("throws on a non-positive use cap", async () => {
+    const inv = new InviteManager(new SequenceTokenSource(), new MemoryInviteStore())
+    await expect(inv.issue(0)).rejects.toThrow(/uses must be >= 1/)
   })
 })
 
-describe("CredentialManager — rotating send-credentials", () => {
-  it("mints a pair and resolves both directions", () => {
-    const cm = new CredentialManager(new SequenceTokenSource("c"))
-    const { inboxAuth, sendCredential } = cm.rotate("h")
+describe("CredentialManager — rotating send-credentials (logic over a CredentialStore)", () => {
+  it("mints a pair and resolves both directions", async () => {
+    const cm = new CredentialManager(new SequenceTokenSource("c"), new MemoryCredentialStore())
+    const { inboxAuth, sendCredential } = await cm.rotate("h")
     expect(inboxAuth).toBe("c-1")
     expect(sendCredential).toBe("c-2")
-    expect(cm.handleForInboxAuth("c-1")).toBe("h")
-    expect(cm.canSendTo("c-2", "h")).toBe(true)
-    expect(cm.handleForSendCredential("c-2")).toBe("h")
+    expect(await cm.handleForInboxAuth("c-1")).toBe("h")
+    expect(await cm.canSendTo("c-2", "h")).toBe(true)
+    expect(await cm.handleForSendCredential("c-2")).toBe("h")
   })
 
-  it("rotation revokes the prior pair", () => {
-    const cm = new CredentialManager(new SequenceTokenSource("c"))
-    cm.rotate("h") // c-1 inbox, c-2 send
-    const next = cm.rotate("h") // c-3 inbox, c-4 send
-    expect(cm.handleForInboxAuth("c-1")).toBeNull()
-    expect(cm.canSendTo("c-2", "h")).toBe(false)
-    expect(cm.handleForInboxAuth(next.inboxAuth)).toBe("h")
-    expect(cm.canSendTo(next.sendCredential, "h")).toBe(true)
+  it("rotation revokes the prior pair", async () => {
+    const cm = new CredentialManager(new SequenceTokenSource("c"), new MemoryCredentialStore())
+    await cm.rotate("h") // c-1 inbox, c-2 send
+    const next = await cm.rotate("h") // c-3 inbox, c-4 send
+    expect(await cm.handleForInboxAuth("c-1")).toBeNull()
+    expect(await cm.canSendTo("c-2", "h")).toBe(false)
+    expect(await cm.handleForInboxAuth(next.inboxAuth)).toBe("h")
+    expect(await cm.canSendTo(next.sendCredential, "h")).toBe(true)
   })
 
-  it("a send credential is bound to exactly ONE handle", () => {
-    const cm = new CredentialManager(new SequenceTokenSource("c"))
-    const { sendCredential } = cm.rotate("h1")
-    expect(cm.canSendTo(sendCredential, "h2")).toBe(false)
+  it("a send credential is bound to exactly ONE handle", async () => {
+    const cm = new CredentialManager(new SequenceTokenSource("c"), new MemoryCredentialStore())
+    const { sendCredential } = await cm.rotate("h1")
+    expect(await cm.canSendTo(sendCredential, "h2")).toBe(false)
   })
 
-  it("unknown credentials resolve to null/false", () => {
-    const cm = new CredentialManager(new SequenceTokenSource())
-    expect(cm.handleForInboxAuth("nope")).toBeNull()
-    expect(cm.handleForSendCredential("nope")).toBeNull()
-    expect(cm.canSendTo("nope", "h")).toBe(false)
+  it("unknown credentials resolve to null/false", async () => {
+    const cm = new CredentialManager(new SequenceTokenSource(), new MemoryCredentialStore())
+    expect(await cm.handleForInboxAuth("nope")).toBeNull()
+    expect(await cm.handleForSendCredential("nope")).toBeNull()
+    expect(await cm.canSendTo("nope", "h")).toBe(false)
   })
 
-  it("revoke clears credentials and is a no-op when absent", () => {
-    const cm = new CredentialManager(new SequenceTokenSource("c"))
-    const { inboxAuth, sendCredential } = cm.rotate("h")
-    cm.revoke("h")
-    expect(cm.handleForInboxAuth(inboxAuth)).toBeNull()
-    expect(cm.canSendTo(sendCredential, "h")).toBe(false)
-    expect(() => cm.revoke("absent")).not.toThrow()
+  it("revoke clears credentials and is a no-op when absent", async () => {
+    const cm = new CredentialManager(new SequenceTokenSource("c"), new MemoryCredentialStore())
+    const { inboxAuth, sendCredential } = await cm.rotate("h")
+    await cm.revoke("h")
+    expect(await cm.handleForInboxAuth(inboxAuth)).toBeNull()
+    expect(await cm.canSendTo(sendCredential, "h")).toBe(false)
+    await expect(cm.revoke("absent")).resolves.toBeUndefined()
   })
 })
 

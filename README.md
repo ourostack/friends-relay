@@ -65,7 +65,17 @@ A thin **`RelayClient`** (`@ouro.bot/friends-relay/client`) wraps this surface s
 
 ## Deploy
 
-The relay is **infra-agnostic**: nothing about any cloud, region, or managed service is baked in. It reads its bind address, public URL, DID, invite policy, quotas/limits/TTL, and credentials entirely from injected env (see `src/config.ts`). The storage backend is an **interface** — an in-memory reference backend ships; a deployment swaps in a durable adapter without touching the relay core. TLS is expected to terminate at an injected reverse proxy (A2A requires HTTPS); the image does not provision it.
+The relay is **infra-agnostic**: nothing about any cloud, region, or managed service is baked in. It reads its bind address, public URL, DID, invite policy, quotas/limits/TTL, credentials, and **storage backend** entirely from injected env (see `src/config.ts`). The storage backend is an **interface** with two shipping implementations, selected by `RELAY_STORE`: an **in-memory** reference backend (default — ephemeral, a restart drops every registration, queued message, invite, and credential) and a durable **Postgres** backend (survives restarts). TLS is expected to terminate at an injected reverse proxy (A2A requires HTTPS); the image does not provision it.
+
+### Durable storage (Postgres)
+
+Set `RELAY_STORE=postgres` and `DATABASE_URL` to persist state across restarts. The relay runs an **idempotent schema migration on startup** (it creates its four tables if absent), so no manual DDL step is needed. The Postgres driver (`pg`) is **pure JavaScript** — no native build step, no Dockerfile change; the same image serves both backends.
+
+**Infra to provision (Postgres path):** an **Azure Database for PostgreSQL flexible server** (burstable **B1ms** is sufficient). Create a database, then inject `RELAY_STORE=postgres` and `DATABASE_URL` (with `sslmode=require`) as env — `DATABASE_URL` should be a **Container App secret**, not a plain env value. Misconfiguration fails loud at startup: `RELAY_STORE=postgres` without `DATABASE_URL` (or an unrecognized `RELAY_STORE`) refuses to boot.
+
+**The content-blind guarantee extends to the database.** The durable inbox stores only `{ recipientDid (routing), opaque sealed blob (jsonb), accounting metadata }` — never plaintext, never a decoded ciphertext, never an index on ciphertext. So a database backup, snapshot, or query-telemetry pipeline carries **ciphertext only**, exactly like the in-memory store. The relay still has no key and no code path that reads `sealed.ct`.
+
+> Rate-limiter token buckets are **intentionally NOT persisted** — they are ephemeral by design. A restart safely loosens the rate window (it never corrupts), so the buckets live in memory regardless of `RELAY_STORE`.
 
 ```sh
 docker build -t friends-relay .
@@ -87,6 +97,8 @@ docker run -p 8080:8080 \
 | `RELAY_INBOX_MAX_MESSAGES` / `RELAY_INBOX_MAX_BYTES` | `256` / `4 MiB` | Per-handle inbox bound |
 | `RELAY_MESSAGE_TTL_MS` | `7 days` | Per-message TTL |
 | `RELAY_SEND_RATE_CAPACITY` / `RELAY_SEND_RATE_REFILL_PER_SEC` | `60` / `1` | Per-send-credential rate limit |
+| `RELAY_STORE` | `memory` | Storage backend: `memory` (ephemeral) or `postgres` (durable) |
+| `DATABASE_URL` | — | Postgres connection string (`postgres://user:pass@host:5432/db?sslmode=require`). **Required when `RELAY_STORE=postgres`**; ignored otherwise |
 
 ## Proof
 

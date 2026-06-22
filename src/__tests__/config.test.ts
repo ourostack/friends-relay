@@ -69,6 +69,45 @@ describe("loadConfig — 12-factor, infra-agnostic", () => {
     expect(() => loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_INBOX_MAX_MESSAGES: "0" })).toThrow(/must be a positive integer/)
   })
 
+  it("defaults RELAY_STORE to memory with no databaseUrl", () => {
+    const cfg = loadConfig({ RELAY_INVITE_POLICY: "open" })
+    expect(cfg.store).toBe("memory")
+    expect(cfg.databaseUrl).toBeUndefined()
+  })
+
+  it("treats an empty RELAY_STORE as memory (default)", () => {
+    const cfg = loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_STORE: "" })
+    expect(cfg.store).toBe("memory")
+  })
+
+  it("accepts RELAY_STORE=postgres with a valid DATABASE_URL", () => {
+    const cfg = loadConfig({
+      RELAY_INVITE_POLICY: "open",
+      RELAY_STORE: "postgres",
+      DATABASE_URL: "postgres://u:p@host:5432/db?sslmode=require",
+    })
+    expect(cfg.store).toBe("postgres")
+    expect(cfg.databaseUrl).toBe("postgres://u:p@host:5432/db?sslmode=require")
+  })
+
+  it("FAILS LOUD when RELAY_STORE=postgres but DATABASE_URL is missing", () => {
+    expect(() => loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_STORE: "postgres" })).toThrow(/DATABASE_URL is required/)
+  })
+
+  it("FAILS LOUD when RELAY_STORE=postgres but DATABASE_URL is empty", () => {
+    expect(() => loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_STORE: "postgres", DATABASE_URL: "" })).toThrow(/DATABASE_URL is required/)
+  })
+
+  it("FAILS LOUD on an unrecognized RELAY_STORE value", () => {
+    expect(() => loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_STORE: "sqlite" })).toThrow(/RELAY_STORE/)
+  })
+
+  it("ignores DATABASE_URL when RELAY_STORE is memory", () => {
+    const cfg = loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_STORE: "memory", DATABASE_URL: "postgres://ignored" })
+    expect(cfg.store).toBe("memory")
+    expect(cfg.databaseUrl).toBeUndefined()
+  })
+
   it("defaults the env bag to process.env", () => {
     // Calling with no arg must not throw for the structure (process.env in CI has no
     // RELAY_* set → closed policy with no admin credential → it throws). We assert it

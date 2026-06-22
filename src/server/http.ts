@@ -10,6 +10,8 @@ import { createServer as createHttpServer } from "node:http"
 import type { IncomingMessage, Server, ServerResponse } from "node:http"
 
 import type { RelayConfig } from "../config"
+import { silentLogger } from "../logger"
+import type { Logger } from "../logger"
 import type { Relay } from "../relay"
 
 /** A transport-free representation of an HTTP request (so handlers are pure +
@@ -71,8 +73,9 @@ function registerStatus(error: string): number {
   }
 }
 
-/** The pure router: (config, relay, request) → response. No sockets. */
-export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): RelayResponse {
+/** The pure router: (config, relay, request) → response. No sockets. Async because
+ * the relay core is async (its storage seam is). */
+export async function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Promise<RelayResponse> {
   // ── liveness ──
   if (req.method === "GET" && req.path === "/healthz") {
     return { status: 200, body: { ok: true } }
@@ -92,13 +95,13 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
     if (uses === null) {
       return { status: 400, body: { error: "bad_request" } }
     }
-    return { status: 200, body: { inviteToken: relay.issueInvite(uses) } }
+    return { status: 200, body: { inviteToken: await relay.issueInvite(uses) } }
   }
 
   // ── register (invite-gated) ──
   if (req.method === "POST" && req.path === "/register") {
     const body = (req.body ?? {}) as Record<string, unknown>
-    const result = relay.register({
+    const result = await relay.register({
       handle: typeof body.handle === "string" ? body.handle : "",
       did: typeof body.did === "string" ? body.did : "",
       agentCard: (body.agentCard ?? null) as never,
@@ -117,10 +120,10 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
     const handle = decodeURIComponent(deregMatch[1])
     // `ownsInbox` passing means the credential is bound to a live registration, so
     // `deregister` always removes it (returns true) — no 404 path is reachable here.
-    if (!req.bearer || !relay.ownsInbox(handle, req.bearer)) {
+    if (!req.bearer || !(await relay.ownsInbox(handle, req.bearer))) {
       return { status: 401, body: { error: "unauthorized" } }
     }
-    relay.deregister(handle)
+    await relay.deregister(handle)
     return { status: 200, body: { ok: true } }
   }
 
@@ -129,7 +132,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
   if (req.method === "POST" && a2aMatch) {
     const handle = decodeURIComponent(a2aMatch[1])
     const sendCredential = req.bearer ?? ""
-    const result = relay.enqueue({ handle, sendCredential, message: req.body })
+    const result = await relay.enqueue({ handle, sendCredential, message: req.body })
     if (!result.ok) {
       return { status: enqueueStatus(result.error), body: { error: result.error } }
     }
@@ -141,7 +144,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
   const pullMatch = /^\/inbox\/([^/]+)$/.exec(req.path)
   if (req.method === "GET" && pullMatch) {
     const handle = decodeURIComponent(pullMatch[1])
-    const result = relay.pull(handle, req.bearer ?? "")
+    const result = await relay.pull(handle, req.bearer ?? "")
     if (!result.ok) {
       return { status: 401, body: { error: result.error } }
     }
@@ -153,7 +156,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
   if (req.method === "POST" && ackMatch) {
     const handle = decodeURIComponent(ackMatch[1])
     const queueId = decodeURIComponent(ackMatch[2])
-    const result = relay.ack(handle, req.bearer ?? "", queueId)
+    const result = await relay.ack(handle, req.bearer ?? "", queueId)
     if (!result.ok) {
       return { status: 401, body: { error: result.error } }
     }
@@ -167,7 +170,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
       return { status: 401, body: { error: "unauthorized" } }
     }
     const handle = decodeURIComponent(dirHandleMatch[1])
-    const entry = relay.lookupByHandle(handle)
+    const entry = await relay.lookupByHandle(handle)
     return entry ? { status: 200, body: entry } : JSON_404
   }
 
@@ -178,7 +181,7 @@ export function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Re
       return { status: 401, body: { error: "unauthorized" } }
     }
     const did = decodeURIComponent(dirDidMatch[1])
-    const entry = relay.lookupByDid(did)
+    const entry = await relay.lookupByDid(did)
     return entry ? { status: 200, body: entry } : JSON_404
   }
 
@@ -220,35 +223,52 @@ export function toRelayRequest(input: {
   }
 }
 
-/** Bind the pure router to a real node:http server. The only un-pure wiring. */
-export function createServer(config: RelayConfig, relay: Relay): Server {
+/** Bind the pure router to a real node:http server. The only un-pure wiring. `logger`
+ * is used SOLELY to record a static event when a request handler rejects (e.g. a
+ * Postgres query throws mid-request) — it logs an event NAME only, never the error
+ * message / connection string / any content (the relay is content-blind end to end). */
+export function createServer(config: RelayConfig, relay: Relay, logger: Logger = silentLogger): Server {
   return createHttpServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = []
     req.on("data", (c: Buffer) => chunks.push(c))
     req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8")
-      let body: unknown
-      if (raw.length > 0) {
-        try {
-          body = JSON.parse(raw)
-        } catch {
-          res.writeHead(400, { "content-type": "application/json" })
-          res.end(JSON.stringify({ error: "bad_json" }))
-          return
+      // The handler is async + can REJECT (the storage seam is async — a Postgres
+      // query can throw mid-request). Without this `.catch` the socket would hang
+      // forever (no response) AND the rejection would be unhandled. The catch writes a
+      // generic 500 + ends the socket, and logs a STATIC event name only — the caught
+      // error is deliberately NOT inspected, so nothing it carries (a message body, a
+      // connection string, any content) can leak into the log or the response.
+      void (async () => {
+        const raw = Buffer.concat(chunks).toString("utf8")
+        let body: unknown
+        if (raw.length > 0) {
+          try {
+            body = JSON.parse(raw)
+          } catch {
+            res.writeHead(400, { "content-type": "application/json" })
+            res.end(JSON.stringify({ error: "bad_json" }))
+            return
+          }
         }
-      }
-      const response = handle(
-        config,
-        relay,
-        toRelayRequest({
-          method: req.method,
-          url: req.url,
-          headers: req.headers as Record<string, string | undefined>,
-          body,
-        }),
-      )
-      res.writeHead(response.status, { "content-type": "application/json" })
-      res.end(JSON.stringify(response.body))
+        const response = await handle(
+          config,
+          relay,
+          toRelayRequest({
+            method: req.method,
+            url: req.url,
+            headers: req.headers as Record<string, string | undefined>,
+            body,
+          }),
+        )
+        res.writeHead(response.status, { "content-type": "application/json" })
+        res.end(JSON.stringify(response.body))
+      })().catch(() => {
+        logger.log("error", "request_failed")
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "application/json" })
+        }
+        res.end(JSON.stringify({ error: "internal_error" }))
+      })
     })
   })
 }

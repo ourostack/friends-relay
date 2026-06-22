@@ -1,0 +1,16 @@
+ RUN  v4.1.9 /Users/microsoft/code/friends-relay
+      Coverage enabled with v8
+
+
+ Test Files  14 passed (14)
+      Tests  266 passed (266)
+   Start at  09:11:22
+   Duration  761ms (transform 1.22s, setup 0ms, import 2.58s, tests 1.49s, environment 1ms)
+
+ % Coverage report from v8
+-------------------|---------|----------|---------|---------|-------------------
+File               | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s 
+-------------------|---------|----------|---------|---------|-------------------
+-------------------|---------|----------|---------|---------|-------------------
+
+=============================== Coverage summary ===============================
