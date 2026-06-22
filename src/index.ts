@@ -16,7 +16,7 @@ export type { RelayDeps, RegisterInput, EnqueueInput, RegisterError, EnqueueErro
 
 // ── config ──
 export { loadConfig } from "./config"
-export type { RelayConfig, InvitePolicy } from "./config"
+export type { RelayConfig, InvitePolicy, StoreBackend } from "./config"
 
 // ── the relay's own A2A card ──
 export { buildRelayAgentCard } from "./agent-card"
@@ -41,6 +41,13 @@ export {
   MemoryCredentialStore,
 } from "./store/memory"
 export type { InboxBounds } from "./store/memory"
+// Durable Postgres backend (adapters + schema migration).
+export { PgInboxStore } from "./store/postgres/inbox"
+export { PgRegistryStore } from "./store/postgres/registry"
+export { PgInviteStore } from "./store/postgres/invites"
+export { PgCredentialStore } from "./store/postgres/credentials"
+export { migrate, SCHEMA_STATEMENTS } from "./store/postgres/schema"
+export type { PgPool } from "./store/postgres/schema"
 
 // ── security primitives ──
 export { RateLimiter } from "./security/rate-limit"
@@ -59,8 +66,8 @@ export type { Logger, LogLevel, LogFields } from "./logger"
 // ── HTTP surface + assembly ──
 export { handle, createServer, parseBearer, toRelayRequest } from "./server/http"
 export type { RelayRequest, RelayResponse } from "./server/http"
-export { assembleRelay } from "./server/bootstrap"
-export type { AssembleOverrides } from "./server/bootstrap"
+export { assembleRelay, assemblePostgresStores, buildPostgresStores, defaultPoolFactory } from "./server/bootstrap"
+export type { AssembleOverrides, PostgresStores, PoolFactory } from "./server/bootstrap"
 
 // ── shared types ──
 export type {

@@ -44,10 +44,12 @@ describe("assembleRelay", () => {
   })
 })
 
+const BOUNDS = { maxMessages: 256, maxBytes: 4 * 1024 * 1024 }
+
 describe("buildPostgresStores", () => {
   it("constructs the four Pg adapters around an injected (already-migrated) pool", async () => {
     const { pool } = await migratedPgMem()
-    const stores = buildPostgresStores(pool)
+    const stores = buildPostgresStores(pool, BOUNDS)
     expect(stores.inbox).toBeInstanceOf(PgInboxStore)
     expect(stores.registry).toBeInstanceOf(PgRegistryStore)
     expect(stores.invites).toBeInstanceOf(PgInviteStore)
@@ -62,7 +64,7 @@ describe("assemblePostgresStores", () => {
   it("creates a pool via the factory, migrates, and returns working stores", async () => {
     const handle = makePgMem()
     // Inject a poolFactory that returns a pg-mem pool (fully hermetic — no network).
-    const stores = await assemblePostgresStores("postgres://ignored", () => handle.newPool())
+    const stores = await assemblePostgresStores("postgres://ignored", BOUNDS, () => handle.newPool())
     // migrate ran: an invite round-trips through the invite store.
     await stores.invites.setRemaining("tok", 2)
     expect(await stores.invites.getRemaining("tok")).toBe(2)
@@ -74,7 +76,7 @@ describe("assemblePostgresStores", () => {
   it("assembles a fully working relay end-to-end over a pg-mem-backed Postgres path", async () => {
     const config = loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_STORE: "postgres", DATABASE_URL: "postgres://ignored" })
     const handle = makePgMem()
-    const stores = await assemblePostgresStores(config.databaseUrl as string, () => handle.newPool())
+    const stores = await assemblePostgresStores(config.databaseUrl as string, config.inboxBounds, () => handle.newPool())
     const relay = assembleRelay(config, { ...stores, tokens: new SequenceTokenSource("p") })
     // register (open) → enqueue → pull → ack, all through the Postgres adapters.
     const reg = await relay.register({ handle: "h", did: "did:key:zR", agentCard: { name: "a", url: "u", version: "1", protocolVersion: "0.3.0", did: "did:key:zR" } })
