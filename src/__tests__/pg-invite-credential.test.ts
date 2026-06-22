@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { sha256Hex } from "../security/hash"
 import { migratedPgMem } from "./pg-harness"
 import { PgInviteStore } from "../store/postgres/invites"
 import { PgCredentialStore } from "../store/postgres/credentials"
@@ -15,6 +16,9 @@ async function credSetup(): Promise<{ store: PgCredentialStore; handle: Awaited<
 }
 
 const pair = (i: string, s: string) => ({ inboxAuth: i, sendCredential: s })
+// RF3: the store hashes inboxAuth + sendCredential at rest, so `getCurrent` returns
+// the SHA-256 DIGEST pair (its only consumer is the rotation revoke path → `deleteFor`).
+const hashedPair = (i: string, s: string) => pair(sha256Hex(i), sha256Hex(s))
 
 describe("PgInviteStore over pg-mem", () => {
   it("setRemaining + getRemaining round-trip; unknown is undefined", async () => {
@@ -77,7 +81,9 @@ describe("PgCredentialStore over pg-mem", () => {
   it("setCurrent records the pair + both reverse lookups", async () => {
     const { store } = await credSetup()
     await store.setCurrent("h", pair("ia", "sc"))
-    expect(await store.getCurrent("h")).toEqual(pair("ia", "sc"))
+    // getCurrent returns the stored DIGESTS (at-rest hashing), not the plaintext.
+    expect(await store.getCurrent("h")).toEqual(hashedPair("ia", "sc"))
+    // Reverse lookups still resolve the PLAINTEXT (the store hashes the presented value).
     expect(await store.handleForInboxAuth("ia")).toBe("h")
     expect(await store.handleForSendCredential("sc")).toBe("h")
   })
@@ -90,13 +96,16 @@ describe("PgCredentialStore over pg-mem", () => {
     expect(await store.handleForSendCredential("sc1")).toBeNull()
     expect(await store.handleForInboxAuth("ia2")).toBe("h")
     expect(await store.handleForSendCredential("sc2")).toBe("h")
-    expect(await store.getCurrent("h")).toEqual(pair("ia2", "sc2"))
+    expect(await store.getCurrent("h")).toEqual(hashedPair("ia2", "sc2"))
   })
 
   it("deleteFor removes the binding when the current pair matches", async () => {
     const { store } = await credSetup()
     await store.setCurrent("h", pair("ia", "sc"))
-    await store.deleteFor("h", pair("ia", "sc"))
+    // `deleteFor` takes the stored (digest) pair — what the production caller passes
+    // (the result of `getCurrent`).
+    const cur = await store.getCurrent("h")
+    await store.deleteFor("h", cur!)
     expect(await store.getCurrent("h")).toBeUndefined()
     expect(await store.handleForInboxAuth("ia")).toBeNull()
     expect(await store.handleForSendCredential("sc")).toBeNull()
@@ -110,9 +119,9 @@ describe("PgCredentialStore over pg-mem", () => {
   it("deleteFor is a no-op when the pair no longer matches (already rotated away)", async () => {
     const { store } = await credSetup()
     await store.setCurrent("h", pair("ia2", "sc2"))
-    await store.deleteFor("h", pair("ia1", "sc1")) // stale pair
+    await store.deleteFor("h", hashedPair("ia1", "sc1")) // stale (digest) pair
     // Current binding untouched.
-    expect(await store.getCurrent("h")).toEqual(pair("ia2", "sc2"))
+    expect(await store.getCurrent("h")).toEqual(hashedPair("ia2", "sc2"))
     expect(await store.handleForInboxAuth("ia2")).toBe("h")
   })
 
@@ -135,9 +144,11 @@ describe("PgCredentialStore over pg-mem", () => {
     const { store, handle } = await credSetup()
     await store.setCurrent("h", pair("ia", "sc"))
     const store2 = new PgCredentialStore(handle.newPool())
+    // Post-restart the PLAINTEXT secret still authenticates (re-hashed for the lookup).
     expect(await store2.handleForInboxAuth("ia")).toBe("h")
     expect(await store2.handleForSendCredential("sc")).toBe("h")
-    expect(await store2.getCurrent("h")).toEqual(pair("ia", "sc"))
+    // The durable row holds the DIGESTS (what survived the restart).
+    expect(await store2.getCurrent("h")).toEqual(hashedPair("ia", "sc"))
   })
 
   it("rotation done pre-restart means the OLD credential is rejected post-restart", async () => {

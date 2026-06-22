@@ -7,6 +7,7 @@
 // queued). This is the DoS floor — no unbounded growth, ever. Dropping is safe
 // because recipient imports are idempotent (a drop is a denial, never corruption).
 
+import { sha256Hex } from "../security/hash"
 import type {
   CredentialPair,
   CredentialStore,
@@ -152,26 +153,31 @@ export class MemoryRegistryStore implements RegistryStore {
 
 /** An in-memory InviteStore — pure persistence of token → remaining-use counters.
  * The single-use / cap ENFORCEMENT lives in InviteManager; this just records the
- * counter and provides the atomic decrement-or-delete primitive. */
+ * counter and provides the atomic decrement-or-delete primitive.
+ *
+ * AT REST (RF3): the invite token is a high-entropy bearer secret, so it is keyed by
+ * its SHA-256 digest, never the plaintext — a leak of this map yields no usable token.
+ * Every method hashes the presented token, so the equality lookup is transparent. */
 export class MemoryInviteStore implements InviteStore {
   private readonly remaining = new Map<string, number>()
 
   async setRemaining(token: string, remaining: number): Promise<void> {
-    this.remaining.set(token, remaining)
+    this.remaining.set(sha256Hex(token), remaining)
   }
 
   async getRemaining(token: string): Promise<number | undefined> {
-    return this.remaining.get(token)
+    return this.remaining.get(sha256Hex(token))
   }
 
   async decrementOrDelete(token: string): Promise<boolean> {
-    const rec = this.remaining.get(token)
+    const key = sha256Hex(token)
+    const rec = this.remaining.get(key)
     if (rec === undefined || rec < 1) return false
     const next = rec - 1
     if (next === 0) {
-      this.remaining.delete(token)
+      this.remaining.delete(key)
     } else {
-      this.remaining.set(token, next)
+      this.remaining.set(key, next)
     }
     return true
   }
@@ -180,22 +186,31 @@ export class MemoryInviteStore implements InviteStore {
 /** An in-memory CredentialStore — pure persistence of handle → current pair plus the
  * two reverse lookups. The rotation revoke-then-mint SEQUENCING lives in
  * CredentialManager; this records bindings and atomically supersedes the prior pair
- * on `setCurrent` (so the old tokens stop resolving even without a preceding delete). */
+ * on `setCurrent` (so the old tokens stop resolving even without a preceding delete).
+ *
+ * AT REST (RF3): inboxAuth + sendCredential are high-entropy bearer secrets, so this
+ * store holds only their SHA-256 DIGESTS — the reverse maps are keyed by digest, and
+ * `current` stores the digest pair. A leak of this store yields no usable bearer. The
+ * boundary is uniform: `setCurrent` + the reverse lookups hash the presented plaintext;
+ * `getCurrent` returns the stored DIGEST pair (its only consumer is the rotation revoke
+ * path, which feeds it straight to `deleteFor`); `deleteFor` therefore matches its
+ * input AS-GIVEN (already a digest pair) and does NOT re-hash. */
 export class MemoryCredentialStore implements CredentialStore {
   private readonly inboxAuthToHandle = new Map<string, string>()
   private readonly sendCredToHandle = new Map<string, string>()
   private readonly current = new Map<string, CredentialPair>()
 
   async setCurrent(handle: string, pair: CredentialPair): Promise<void> {
+    const hashed: CredentialPair = { inboxAuth: sha256Hex(pair.inboxAuth), sendCredential: sha256Hex(pair.sendCredential) }
     // Atomically supersede any prior pair for this handle (drop its reverse entries).
     const prev = this.current.get(handle)
     if (prev) {
       this.inboxAuthToHandle.delete(prev.inboxAuth)
       this.sendCredToHandle.delete(prev.sendCredential)
     }
-    this.inboxAuthToHandle.set(pair.inboxAuth, handle)
-    this.sendCredToHandle.set(pair.sendCredential, handle)
-    this.current.set(handle, pair)
+    this.inboxAuthToHandle.set(hashed.inboxAuth, handle)
+    this.sendCredToHandle.set(hashed.sendCredential, handle)
+    this.current.set(handle, hashed)
   }
 
   async getCurrent(handle: string): Promise<CredentialPair | undefined> {
@@ -203,7 +218,8 @@ export class MemoryCredentialStore implements CredentialStore {
   }
 
   async deleteFor(handle: string, pair: CredentialPair): Promise<void> {
-    // Only delete if the handle's current pair is still the one being revoked.
+    // `pair` is already in stored (digest) form — the production caller passes the
+    // result of `getCurrent`. Only delete if the handle's current pair still matches.
     const cur = this.current.get(handle)
     if (!cur || cur.inboxAuth !== pair.inboxAuth || cur.sendCredential !== pair.sendCredential) {
       return
@@ -214,10 +230,10 @@ export class MemoryCredentialStore implements CredentialStore {
   }
 
   async handleForInboxAuth(inboxAuth: string): Promise<string | null> {
-    return this.inboxAuthToHandle.get(inboxAuth) ?? null
+    return this.inboxAuthToHandle.get(sha256Hex(inboxAuth)) ?? null
   }
 
   async handleForSendCredential(sendCredential: string): Promise<string | null> {
-    return this.sendCredToHandle.get(sendCredential) ?? null
+    return this.sendCredToHandle.get(sha256Hex(sendCredential)) ?? null
   }
 }

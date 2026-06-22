@@ -6,6 +6,7 @@
 // pg-{inbox,registry,invite-credential}.test.ts; this suite is the shared contract.)
 import { describe, expect, it } from "vitest"
 
+import { sha256Hex } from "../security/hash"
 import { migratedPgMem } from "./pg-harness"
 import type { CredentialStore, InboxStore, InviteStore, RegistryStore } from "../store/interfaces"
 import type { InboxBounds } from "../store/memory"
@@ -285,11 +286,17 @@ for (const backend of backends) {
 
   describe(`[${backend.name}] CredentialStore — binding persistence`, () => {
     const pair = (i: string, s: string) => ({ inboxAuth: i, sendCredential: s })
+    // RF3: the store hashes the high-entropy secrets at rest, so `getCurrent` returns
+    // the SHA-256 DIGEST pair (identical across BOTH backends → parity preserved). Its
+    // only consumer is the rotation revoke path, which feeds the digests to `deleteFor`.
+    const hashedPair = (i: string, s: string) => pair(sha256Hex(i), sha256Hex(s))
 
     it("setCurrent records both reverse lookups + current", async () => {
       const cs = await backend.makeCred()
       await cs.setCurrent("h", pair("ia", "sc"))
-      expect(await cs.getCurrent("h")).toEqual(pair("ia", "sc"))
+      // getCurrent returns the stored DIGESTS, not the plaintext (at-rest hashing).
+      expect(await cs.getCurrent("h")).toEqual(hashedPair("ia", "sc"))
+      // The reverse lookups still resolve the PLAINTEXT secret (the store hashes it).
       expect(await cs.handleForInboxAuth("ia")).toBe("h")
       expect(await cs.handleForSendCredential("sc")).toBe("h")
     })
@@ -306,7 +313,11 @@ for (const backend of backends) {
     it("deleteFor removes the binding when the current pair matches", async () => {
       const cs = await backend.makeCred()
       await cs.setCurrent("h", pair("ia", "sc"))
-      await cs.deleteFor("h", pair("ia", "sc"))
+      // `deleteFor` takes the stored (digest) pair — exactly what the production caller
+      // (CredentialManager.rotate/revoke) passes: the result of `getCurrent`.
+      const cur = await cs.getCurrent("h")
+      expect(cur).toBeDefined()
+      await cs.deleteFor("h", cur!)
       expect(await cs.getCurrent("h")).toBeUndefined()
       expect(await cs.handleForInboxAuth("ia")).toBeNull()
       expect(await cs.handleForSendCredential("sc")).toBeNull()
@@ -320,8 +331,9 @@ for (const backend of backends) {
     it("deleteFor is a no-op when the pair no longer matches the current (already rotated away)", async () => {
       const cs = await backend.makeCred()
       await cs.setCurrent("h", pair("ia2", "sc2"))
-      await cs.deleteFor("h", pair("ia1", "sc1"))
-      expect(await cs.getCurrent("h")).toEqual(pair("ia2", "sc2"))
+      // A stale pair (the digests of an already-rotated-away pair) matches no row → no-op.
+      await cs.deleteFor("h", hashedPair("ia1", "sc1"))
+      expect(await cs.getCurrent("h")).toEqual(hashedPair("ia2", "sc2"))
       expect(await cs.handleForInboxAuth("ia2")).toBe("h")
     })
 
