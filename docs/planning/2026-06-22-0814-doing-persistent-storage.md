@@ -143,7 +143,7 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **What**: Add the per-adapter content-blind assertion: enqueue a sealed message, read the raw row, assert the `message` jsonb round-trips to exactly `{v, sealed:{v,ePk,n,ct}, recipientDid}` with no plaintext substrings, and assert the schema has no ciphertext index/column.
 **Acceptance**: 100% coverage; content-blind structural test green.
 
-### ⬜ Unit 3a: Postgres RegistryStore adapter — tests (RED)
+### ✅ Unit 3a: Postgres RegistryStore adapter — tests (RED)
 **What**: Hermetic `pg-mem` tests for `PgRegistryStore implements RegistryStore`: put/getByHandle/getByDid/remove, plus the two tricky semantics proven for the memory store — re-registration with a NEW did clears the stale did index, and `remove` does NOT clobber a did index re-pointed to another handle.
 **Acceptance**: Tests exist and FAIL.
 
