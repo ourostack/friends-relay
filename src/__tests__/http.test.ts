@@ -7,7 +7,7 @@ import { Relay } from "../relay"
 import { SequenceTokenSource } from "../security/tokens"
 import { createServer, handle, parseBearer, toRelayRequest } from "../server/http"
 import type { RelayRequest } from "../server/http"
-import { MemoryInboxStore, MemoryRegistryStore } from "../store/memory"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
 import type { A2AMessage, PublicAgentCard } from "../types"
 
 const CARD: PublicAgentCard = { name: "a", url: "https://a", version: "1", protocolVersion: "0.3.0", did: "did:key:zRecipient" }
@@ -35,6 +35,8 @@ function makeRelay(config = baseConfig()) {
     config,
     inbox: new MemoryInboxStore(config.inboxBounds),
     registry: new MemoryRegistryStore(),
+    invites: new MemoryInviteStore(),
+    credentials: new MemoryCredentialStore(),
     tokens: new SequenceTokenSource("t"),
     clock: new ManualClock(0),
     logger: new MemoryLogger(),

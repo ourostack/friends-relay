@@ -43,7 +43,7 @@ import { Relay } from "../relay"
 import { SequenceTokenSource } from "../security/tokens"
 import { handle } from "../server/http"
 import type { RelayRequest } from "../server/http"
-import { MemoryInboxStore, MemoryRegistryStore } from "../store/memory"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
 import { RelayClient, RelayClientError } from "../client"
 import type { FetchLike } from "../client"
 
@@ -176,6 +176,8 @@ describe("INTEROP — the real @ouro.bot/friends/a2a-client through the relay", 
       config: cfg,
       inbox,
       registry: new MemoryRegistryStore(),
+      invites: new MemoryInviteStore(),
+      credentials: new MemoryCredentialStore(),
       tokens: new SequenceTokenSource("t"),
       clock,
       logger: new MemoryLogger(),

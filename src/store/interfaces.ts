@@ -67,3 +67,48 @@ export interface RegistryStore {
   /** Remove a registration. Returns true if it existed. */
   remove(handle: string): Promise<boolean>
 }
+
+/** A store of invite tokens → remaining-use counters. Pure persistence: the
+ * use-cap / single-use ENFORCEMENT lives in `InviteManager` (logic-over-store); this
+ * just records and mutates the counter. ALL methods async (durable-backend seam). */
+export interface InviteStore {
+  /** Set the remaining-use counter for `token` (issuance). */
+  setRemaining(token: string, remaining: number): Promise<void>
+
+  /** Read the remaining uses for `token`, or undefined if unknown. */
+  getRemaining(token: string): Promise<number | undefined>
+
+  /** Atomically consume one use of `token`: if it exists with >= 1 remaining,
+   * decrement it (deleting it at 0) and return true; otherwise return false. The
+   * atomicity is the store's responsibility so a single-use token can't be
+   * double-spent under concurrency. */
+  decrementOrDelete(token: string): Promise<boolean>
+}
+
+/** The current credential pair bound to a handle. */
+export interface CredentialPair {
+  inboxAuth: string
+  sendCredential: string
+}
+
+/** A store of credential bindings: handle → its current (inboxAuth, sendCredential)
+ * pair, plus the two reverse lookups. Pure persistence: the rotation
+ * revoke-then-mint SEQUENCING lives in `CredentialManager`. ALL methods async. */
+export interface CredentialStore {
+  /** Set (or REPLACE) the current pair for `handle`. Replacing atomically supersedes
+   * the prior pair so the old tokens stop resolving via the reverse lookups. */
+  setCurrent(handle: string, pair: CredentialPair): Promise<void>
+
+  /** The current pair for `handle`, or undefined. */
+  getCurrent(handle: string): Promise<CredentialPair | undefined>
+
+  /** Delete `handle`'s binding IFF its current pair equals `pair` (revoke). A no-op
+   * if absent or already rotated away. */
+  deleteFor(handle: string, pair: CredentialPair): Promise<void>
+
+  /** Resolve an inboxAuth bearer to the handle it may drain, or null. */
+  handleForInboxAuth(inboxAuth: string): Promise<string | null>
+
+  /** Resolve a send credential to the handle it may post to, or null. */
+  handleForSendCredential(sendCredential: string): Promise<string | null>
+}

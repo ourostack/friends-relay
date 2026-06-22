@@ -7,7 +7,7 @@ import { Relay } from "../relay"
 import { SequenceTokenSource } from "../security/tokens"
 import { handle } from "../server/http"
 import type { RelayRequest } from "../server/http"
-import { MemoryInboxStore, MemoryRegistryStore } from "../store/memory"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
 import type { A2AMessage, PublicAgentCard } from "../types"
 import { RelayClient, RelayClientError } from "../client"
 import type { FetchLike } from "../client"
@@ -56,6 +56,8 @@ function makeClient(cfg = config()) {
     config: cfg,
     inbox: new MemoryInboxStore(cfg.inboxBounds),
     registry: new MemoryRegistryStore(),
+    invites: new MemoryInviteStore(),
+    credentials: new MemoryCredentialStore(),
     tokens: new SequenceTokenSource("t"),
     clock: new ManualClock(0),
     logger: new MemoryLogger(),
