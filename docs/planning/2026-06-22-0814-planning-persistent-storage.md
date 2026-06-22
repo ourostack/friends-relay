@@ -25,15 +25,16 @@ The relay is deployed (`ouro-prod-friends-relay`, Azure Container Apps) on **in-
 - Multi-replica / horizontal-scale concurrency hardening beyond what the chosen backend gives for free (the prod app is single-replica; see Open Questions).
 
 ## Completion Criteria
-- [ ] Every state family identified in the audit either persists through the durable backend or is explicitly documented as intentionally ephemeral (with rationale).
-- [ ] In-memory backend remains the default; with no persistence env set, behavior + tests are byte-for-byte unchanged.
-- [ ] Durable backend selected purely by env/config; misconfiguration fails loud at startup (consistent with `loadConfig`'s existing fail-loud contract).
-- [ ] Content-blind invariant preserved and proven: the durable inbox persists only `{ recipientDid, opaque A2AMessage blob, queueId, enqueuedAt, expiresAt, sizeBytes }` — no plaintext, no key, no decoded `sealed.ct`. A test asserts the persisted form contains only the opaque blob (mirroring the interop test's "only ever held ciphertext" assertion against the new backend).
-- [ ] Ordered-queue + ack/delete + per-handle count/byte quota + TTL semantics of `InboxStore` are reproduced exactly by the durable backend (the existing `store.test.ts` behavioral contract passes against it).
-- [ ] Re-registration credential rotation + invite single-use/capped consumption survive a simulated restart (state reloaded from the durable store).
-- [ ] 100% coverage on all new code (no `v8 ignore` on new logic except the established bin/process-wiring pattern).
-- [ ] All tests pass; `npm run typecheck` + `npm run lint` clean; no warnings.
-- [ ] README "Deploy" section updated with the new backend env var(s) and the one-line infra-to-provision note.
+*(Synced to done from the executed doing doc — see `2026-06-22-0814-doing-persistent-storage.md`. Final gate: 266 tests, 100% coverage, typecheck+build+lint clean.)*
+- [x] Every state family identified in the audit either persists through the durable backend or is explicitly documented as intentionally ephemeral (with rationale).
+- [x] In-memory backend remains the default; with no persistence env set, behavior + tests are byte-for-byte unchanged. *(modulo the internal sync→async signature shift)*
+- [x] Durable backend selected purely by env/config; misconfiguration fails loud at startup (consistent with `loadConfig`'s existing fail-loud contract).
+- [x] Content-blind invariant preserved and proven: the durable inbox persists only the opaque blob + routing DID — no plaintext, no key, no decoded `sealed.ct`. A test asserts the persisted form contains only the opaque blob (mirroring the interop test's "only ever held ciphertext" assertion against the Postgres adapter).
+- [x] Ordered-queue + ack/delete + per-handle count/byte quota + TTL semantics of `InboxStore` are reproduced exactly by the durable backend (the `store.test.ts` behavioral contract passes against BOTH backends).
+- [x] Re-registration credential rotation + invite single-use/capped consumption survive a simulated restart (state reloaded from the durable store).
+- [x] 100% coverage on all new code (no `v8 ignore` on new logic except the established bin/process-wiring pattern).
+- [x] All tests pass; `npm run typecheck` + `npm run lint` clean; no warnings.
+- [x] README "Deploy" section updated with the new backend env var(s) and the one-line infra-to-provision note.
 
 ## Code Coverage Requirements
 **MANDATORY: 100% coverage on all new code.**
