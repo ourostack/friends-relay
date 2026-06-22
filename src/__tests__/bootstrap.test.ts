@@ -4,7 +4,7 @@ import { ManualClock } from "../clock"
 import { loadConfig } from "../config"
 import { MemoryLogger } from "../logger"
 import { SequenceTokenSource } from "../security/tokens"
-import { MemoryInboxStore, MemoryRegistryStore } from "../store/memory"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
 import { assembleRelay } from "../server/bootstrap"
 
 describe("assembleRelay", () => {
@@ -24,7 +24,9 @@ describe("assembleRelay", () => {
     const tokens = new SequenceTokenSource("z")
     const inbox = new MemoryInboxStore(config.inboxBounds)
     const registry = new MemoryRegistryStore()
-    const relay = assembleRelay(config, { clock, logger, tokens, inbox, registry })
+    const invites = new MemoryInviteStore()
+    const credentials = new MemoryCredentialStore()
+    const relay = assembleRelay(config, { clock, logger, tokens, inbox, registry, invites, credentials })
     const reg = await relay.register({ handle: "h", did: "did:key:zR", agentCard: { name: "a", url: "u", version: "1", protocolVersion: "0.3.0", did: "did:key:zR" } })
     // The injected sequence token source produced the credentials.
     expect(reg.ok && reg.grant.inboxAuth).toBe("z-1")
@@ -32,5 +34,7 @@ describe("assembleRelay", () => {
     expect(logger.entries.some((e) => e.event === "registered")).toBe(true)
     // The injected clock stamped registeredAt.
     expect((await registry.getByHandle("h"))?.registeredAt).toBe(123)
+    // The injected credential store holds the binding.
+    expect(await credentials.handleForInboxAuth("z-1")).toBe("h")
   })
 })

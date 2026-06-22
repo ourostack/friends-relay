@@ -26,8 +26,20 @@ export type { BuildRelayCardInput } from "./agent-card"
 export { validateOpaqueMessage, messageSizeBytes } from "./message"
 
 // ── storage (swappable backend seam) ──
-export type { InboxStore, RegistryStore, EnqueueResult } from "./store/interfaces"
-export { MemoryInboxStore, MemoryRegistryStore } from "./store/memory"
+export type {
+  InboxStore,
+  RegistryStore,
+  InviteStore,
+  CredentialStore,
+  CredentialPair,
+  EnqueueResult,
+} from "./store/interfaces"
+export {
+  MemoryInboxStore,
+  MemoryRegistryStore,
+  MemoryInviteStore,
+  MemoryCredentialStore,
+} from "./store/memory"
 export type { InboxBounds } from "./store/memory"
 
 // ── security primitives ──

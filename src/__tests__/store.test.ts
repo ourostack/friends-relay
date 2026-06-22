@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { MemoryInboxStore, MemoryRegistryStore } from "../store/memory"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
 import type { A2AMessage, PublicAgentCard } from "../types"
 
 function msg(ct = "ct", id = "m1"): A2AMessage {
@@ -162,5 +162,88 @@ describe("MemoryRegistryStore", () => {
     // Removing h1 must not delete the DID index that now belongs to h2.
     expect(await reg.remove("h1")).toBe(true)
     expect((await reg.getByDid("did:key:zShared"))?.handle).toBe("h2")
+  })
+})
+
+describe("MemoryInviteStore — invite counter persistence", () => {
+  it("setRemaining + getRemaining round-trip; unknown is undefined", async () => {
+    const inv = new MemoryInviteStore()
+    expect(await inv.getRemaining("t")).toBeUndefined()
+    await inv.setRemaining("t", 3)
+    expect(await inv.getRemaining("t")).toBe(3)
+  })
+
+  it("decrementOrDelete: unknown → false", async () => {
+    const inv = new MemoryInviteStore()
+    expect(await inv.decrementOrDelete("nope")).toBe(false)
+  })
+
+  it("decrementOrDelete: multi-use decrements then deletes at 0", async () => {
+    const inv = new MemoryInviteStore()
+    await inv.setRemaining("t", 2)
+    expect(await inv.decrementOrDelete("t")).toBe(true)
+    expect(await inv.getRemaining("t")).toBe(1)
+    expect(await inv.decrementOrDelete("t")).toBe(true)
+    // Deleted at 0 — gone, and a further consume fails.
+    expect(await inv.getRemaining("t")).toBeUndefined()
+    expect(await inv.decrementOrDelete("t")).toBe(false)
+  })
+
+  it("decrementOrDelete: a token explicitly set to 0 is treated as exhausted", async () => {
+    const inv = new MemoryInviteStore()
+    await inv.setRemaining("t", 0)
+    expect(await inv.decrementOrDelete("t")).toBe(false)
+  })
+})
+
+describe("MemoryCredentialStore — binding persistence", () => {
+  const pair = (i: string, s: string) => ({ inboxAuth: i, sendCredential: s })
+
+  it("setCurrent records both reverse lookups + current", async () => {
+    const cs = new MemoryCredentialStore()
+    await cs.setCurrent("h", pair("ia", "sc"))
+    expect(await cs.getCurrent("h")).toEqual(pair("ia", "sc"))
+    expect(await cs.handleForInboxAuth("ia")).toBe("h")
+    expect(await cs.handleForSendCredential("sc")).toBe("h")
+  })
+
+  it("setCurrent AGAIN supersedes the prior pair (old reverse lookups stop resolving)", async () => {
+    const cs = new MemoryCredentialStore()
+    await cs.setCurrent("h", pair("ia1", "sc1"))
+    // Re-set WITHOUT a preceding deleteFor — setCurrent must drop the old reverse entries.
+    await cs.setCurrent("h", pair("ia2", "sc2"))
+    expect(await cs.handleForInboxAuth("ia1")).toBeNull()
+    expect(await cs.handleForSendCredential("sc1")).toBeNull()
+    expect(await cs.handleForInboxAuth("ia2")).toBe("h")
+  })
+
+  it("deleteFor removes the binding when the current pair matches", async () => {
+    const cs = new MemoryCredentialStore()
+    await cs.setCurrent("h", pair("ia", "sc"))
+    await cs.deleteFor("h", pair("ia", "sc"))
+    expect(await cs.getCurrent("h")).toBeUndefined()
+    expect(await cs.handleForInboxAuth("ia")).toBeNull()
+    expect(await cs.handleForSendCredential("sc")).toBeNull()
+  })
+
+  it("deleteFor is a no-op when the handle is absent", async () => {
+    const cs = new MemoryCredentialStore()
+    await expect(cs.deleteFor("absent", pair("ia", "sc"))).resolves.toBeUndefined()
+  })
+
+  it("deleteFor is a no-op when the pair no longer matches the current (already rotated away)", async () => {
+    const cs = new MemoryCredentialStore()
+    await cs.setCurrent("h", pair("ia2", "sc2")) // current is the NEW pair
+    // Attempt to delete a STALE pair — must not touch the current binding.
+    await cs.deleteFor("h", pair("ia1", "sc1"))
+    expect(await cs.getCurrent("h")).toEqual(pair("ia2", "sc2"))
+    expect(await cs.handleForInboxAuth("ia2")).toBe("h")
+  })
+
+  it("unknown reverse lookups resolve to null", async () => {
+    const cs = new MemoryCredentialStore()
+    expect(await cs.handleForInboxAuth("nope")).toBeNull()
+    expect(await cs.handleForSendCredential("nope")).toBeNull()
+    expect(await cs.getCurrent("nope")).toBeUndefined()
   })
 })

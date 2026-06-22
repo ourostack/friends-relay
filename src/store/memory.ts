@@ -7,7 +7,14 @@
 // queued). This is the DoS floor — no unbounded growth, ever. Dropping is safe
 // because recipient imports are idempotent (a drop is a denial, never corruption).
 
-import type { EnqueueResult, InboxStore, RegistryStore } from "./interfaces"
+import type {
+  CredentialPair,
+  CredentialStore,
+  EnqueueResult,
+  InboxStore,
+  InviteStore,
+  RegistryStore,
+} from "./interfaces"
 import type { Registration, QueuedMessage, A2AMessage } from "../types"
 
 /** Per-handle inbox bounds. Both are hard caps — exceeding either drops the
@@ -140,5 +147,77 @@ export class MemoryRegistryStore implements RegistryStore {
       this.byDid.delete(reg.did)
     }
     return true
+  }
+}
+
+/** An in-memory InviteStore — pure persistence of token → remaining-use counters.
+ * The single-use / cap ENFORCEMENT lives in InviteManager; this just records the
+ * counter and provides the atomic decrement-or-delete primitive. */
+export class MemoryInviteStore implements InviteStore {
+  private readonly remaining = new Map<string, number>()
+
+  async setRemaining(token: string, remaining: number): Promise<void> {
+    this.remaining.set(token, remaining)
+  }
+
+  async getRemaining(token: string): Promise<number | undefined> {
+    return this.remaining.get(token)
+  }
+
+  async decrementOrDelete(token: string): Promise<boolean> {
+    const rec = this.remaining.get(token)
+    if (rec === undefined || rec < 1) return false
+    const next = rec - 1
+    if (next === 0) {
+      this.remaining.delete(token)
+    } else {
+      this.remaining.set(token, next)
+    }
+    return true
+  }
+}
+
+/** An in-memory CredentialStore — pure persistence of handle → current pair plus the
+ * two reverse lookups. The rotation revoke-then-mint SEQUENCING lives in
+ * CredentialManager; this records bindings and atomically supersedes the prior pair
+ * on `setCurrent` (so the old tokens stop resolving even without a preceding delete). */
+export class MemoryCredentialStore implements CredentialStore {
+  private readonly inboxAuthToHandle = new Map<string, string>()
+  private readonly sendCredToHandle = new Map<string, string>()
+  private readonly current = new Map<string, CredentialPair>()
+
+  async setCurrent(handle: string, pair: CredentialPair): Promise<void> {
+    // Atomically supersede any prior pair for this handle (drop its reverse entries).
+    const prev = this.current.get(handle)
+    if (prev) {
+      this.inboxAuthToHandle.delete(prev.inboxAuth)
+      this.sendCredToHandle.delete(prev.sendCredential)
+    }
+    this.inboxAuthToHandle.set(pair.inboxAuth, handle)
+    this.sendCredToHandle.set(pair.sendCredential, handle)
+    this.current.set(handle, pair)
+  }
+
+  async getCurrent(handle: string): Promise<CredentialPair | undefined> {
+    return this.current.get(handle)
+  }
+
+  async deleteFor(handle: string, pair: CredentialPair): Promise<void> {
+    // Only delete if the handle's current pair is still the one being revoked.
+    const cur = this.current.get(handle)
+    if (!cur || cur.inboxAuth !== pair.inboxAuth || cur.sendCredential !== pair.sendCredential) {
+      return
+    }
+    this.inboxAuthToHandle.delete(pair.inboxAuth)
+    this.sendCredToHandle.delete(pair.sendCredential)
+    this.current.delete(handle)
+  }
+
+  async handleForInboxAuth(inboxAuth: string): Promise<string | null> {
+    return this.inboxAuthToHandle.get(inboxAuth) ?? null
+  }
+
+  async handleForSendCredential(sendCredential: string): Promise<string | null> {
+    return this.sendCredToHandle.get(sendCredential) ?? null
   }
 }

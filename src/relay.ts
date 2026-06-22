@@ -19,7 +19,7 @@ import { CredentialManager } from "./security/credentials"
 import { InviteManager } from "./security/invites"
 import { RateLimiter } from "./security/rate-limit"
 import type { TokenSource } from "./security/tokens"
-import type { InboxStore, RegistryStore } from "./store/interfaces"
+import type { CredentialStore, InboxStore, InviteStore, RegistryStore } from "./store/interfaces"
 import type {
   A2AMessage,
   PublicAgentCard,
@@ -34,6 +34,10 @@ export interface RelayDeps {
   config: RelayConfig
   inbox: InboxStore
   registry: RegistryStore
+  /** Durable store of invite tokens (the InviteManager's persistence). */
+  invites: InviteStore
+  /** Durable store of credential bindings (the CredentialManager's persistence). */
+  credentials: CredentialStore
   tokens: TokenSource
   clock: Clock
   logger: Logger
@@ -81,8 +85,8 @@ export class Relay {
   private readonly sendLimiter: RateLimiter
 
   constructor(private readonly deps: RelayDeps) {
-    this.invites = new InviteManager(deps.tokens)
-    this.credentials = new CredentialManager(deps.tokens)
+    this.invites = new InviteManager(deps.tokens, deps.invites)
+    this.credentials = new CredentialManager(deps.tokens, deps.credentials)
     this.sendLimiter = new RateLimiter(deps.config.sendRateLimit, deps.clock)
   }
 
@@ -126,7 +130,7 @@ export class Relay {
         this.deps.logger.log("warn", "register_rejected", { handle: input.handle, reason: "invite_required" })
         return { ok: false, error: "invite_required" }
       }
-      if (!this.invites.consume(input.inviteToken)) {
+      if (!(await this.invites.consume(input.inviteToken))) {
         this.deps.logger.log("warn", "register_rejected", { handle: input.handle, reason: "invite_invalid" })
         return { ok: false, error: "invite_invalid" }
       }
@@ -139,7 +143,7 @@ export class Relay {
       keyAgreementPubKey: input.keyAgreementPubKey,
       registeredAt: this.deps.clock.now(),
     })
-    const { inboxAuth, sendCredential } = this.credentials.rotate(input.handle)
+    const { inboxAuth, sendCredential } = await this.credentials.rotate(input.handle)
     this.deps.logger.log("info", "registered", { handle: input.handle, decision: "registered" })
     return {
       ok: true,
@@ -151,13 +155,13 @@ export class Relay {
   /** Whether `inboxAuth` is the bearer that may drain (and therefore administer)
    * `handle`. The HTTP layer uses this to gate deregistration. */
   async ownsInbox(handle: string, inboxAuth: string): Promise<boolean> {
-    return this.credentials.handleForInboxAuth(inboxAuth) === handle
+    return (await this.credentials.handleForInboxAuth(inboxAuth)) === handle
   }
 
   /** Deregister a handle (auth'd by its inboxAuth at the HTTP layer). Revokes its
    * credentials and removes the registration. Returns whether it existed. */
   async deregister(handle: string): Promise<boolean> {
-    this.credentials.revoke(handle)
+    await this.credentials.revoke(handle)
     const existed = await this.deps.registry.remove(handle)
     if (existed) {
       this.deps.logger.log("info", "deregistered", { handle, decision: "deregistered" })
@@ -178,7 +182,7 @@ export class Relay {
     if (!reg) {
       return { ok: false, error: "unknown_handle" }
     }
-    if (!this.credentials.canSendTo(input.sendCredential, input.handle)) {
+    if (!(await this.credentials.canSendTo(input.sendCredential, input.handle))) {
       this.deps.logger.log("warn", "enqueue_rejected", { handle: input.handle, reason: "bad_send_credential" })
       return { ok: false, error: "bad_send_credential" }
     }
@@ -227,7 +231,7 @@ export class Relay {
    * inboxAuth bearer (which must resolve to THIS handle). Expired messages are not
    * returned (and get dropped). The returned messages are still ciphertext. */
   async pull(handle: string, inboxAuth: string): Promise<{ ok: true; messages: QueuedMessage[] } | { ok: false; error: InboxError }> {
-    if (this.credentials.handleForInboxAuth(inboxAuth) !== handle) {
+    if ((await this.credentials.handleForInboxAuth(inboxAuth)) !== handle) {
       this.deps.logger.log("warn", "pull_rejected", { handle, reason: "bad_inbox_auth" })
       return { ok: false, error: "bad_inbox_auth" }
     }
@@ -239,7 +243,7 @@ export class Relay {
   /** Ack (delete) a delivered message by queueId. Auth'd by the inboxAuth bearer.
    * Returns whether the message existed (idempotent — a re-ack is harmless). */
   async ack(handle: string, inboxAuth: string, queueId: string): Promise<{ ok: true; existed: boolean } | { ok: false; error: InboxError }> {
-    if (this.credentials.handleForInboxAuth(inboxAuth) !== handle) {
+    if ((await this.credentials.handleForInboxAuth(inboxAuth)) !== handle) {
       this.deps.logger.log("warn", "ack_rejected", { handle, reason: "bad_inbox_auth" })
       return { ok: false, error: "bad_inbox_auth" }
     }

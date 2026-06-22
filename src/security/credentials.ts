@@ -11,58 +11,57 @@
 //
 // Both are opaque random strings (security/tokens). Re-registration ROTATES both,
 // invalidating the prior pair.
+//
+// This is the LOGIC layer over a CredentialStore (pure persistence). The manager owns
+// the rotation revoke-then-mint sequencing + the canSendTo binding check; the store
+// owns the durable bindings + reverse lookups.
+import type { CredentialPair, CredentialStore } from "../store/interfaces"
 import type { TokenSource } from "./tokens"
 
-/** Tracks credential → handle bindings for inbox-drain and send auth. */
+/** Manages credential → handle bindings for inbox-drain and send auth, over a
+ * CredentialStore. */
 export class CredentialManager {
-  /** inboxAuth bearer → the handle it may drain. */
-  private readonly inboxAuthToHandle = new Map<string, string>()
-  /** sendCredential → the handle it may post to. */
-  private readonly sendCredToHandle = new Map<string, string>()
-  /** handle → its current (inboxAuth, sendCredential), so rotation can revoke the old. */
-  private readonly current = new Map<string, { inboxAuth: string; sendCredential: string }>()
-
-  constructor(private readonly tokens: TokenSource) {}
+  constructor(
+    private readonly tokens: TokenSource,
+    private readonly store: CredentialStore,
+  ) {}
 
   /** Mint (or ROTATE) the credential pair for `handle`. A prior pair for the same
-   * handle is revoked. Returns the fresh pair. */
-  rotate(handle: string): { inboxAuth: string; sendCredential: string } {
-    const prev = this.current.get(handle)
+   * handle is revoked first. Returns the fresh pair. */
+  async rotate(handle: string): Promise<CredentialPair> {
+    const prev = await this.store.getCurrent(handle)
     if (prev) {
-      this.inboxAuthToHandle.delete(prev.inboxAuth)
-      this.sendCredToHandle.delete(prev.sendCredential)
+      await this.store.deleteFor(handle, prev)
     }
     const inboxAuth = this.tokens.mint()
     const sendCredential = this.tokens.mint()
-    this.inboxAuthToHandle.set(inboxAuth, handle)
-    this.sendCredToHandle.set(sendCredential, handle)
-    this.current.set(handle, { inboxAuth, sendCredential })
-    return { inboxAuth, sendCredential }
+    const pair: CredentialPair = { inboxAuth, sendCredential }
+    await this.store.setCurrent(handle, pair)
+    return pair
   }
 
   /** Revoke a handle's credentials entirely (deregistration). No-op if absent. */
-  revoke(handle: string): void {
-    const prev = this.current.get(handle)
-    if (!prev) return
-    this.inboxAuthToHandle.delete(prev.inboxAuth)
-    this.sendCredToHandle.delete(prev.sendCredential)
-    this.current.delete(handle)
+  async revoke(handle: string): Promise<void> {
+    const prev = await this.store.getCurrent(handle)
+    if (prev) {
+      await this.store.deleteFor(handle, prev)
+    }
   }
 
   /** Resolve an inboxAuth bearer to the handle it may drain, or null. */
-  handleForInboxAuth(token: string): string | null {
-    return this.inboxAuthToHandle.get(token) ?? null
+  async handleForInboxAuth(token: string): Promise<string | null> {
+    return this.store.handleForInboxAuth(token)
   }
 
   /** Validate that `sendCredential` may post to `handle`. A send credential is
    * bound to ONE recipient handle (it does not grant posting to arbitrary handles). */
-  canSendTo(sendCredential: string, handle: string): boolean {
-    return this.sendCredToHandle.get(sendCredential) === handle
+  async canSendTo(sendCredential: string, handle: string): Promise<boolean> {
+    return (await this.store.handleForSendCredential(sendCredential)) === handle
   }
 
   /** Resolve a send credential to the handle it may post to (for rate-limit keying
    * + metrics), or null. */
-  handleForSendCredential(sendCredential: string): string | null {
-    return this.sendCredToHandle.get(sendCredential) ?? null
+  async handleForSendCredential(sendCredential: string): Promise<string | null> {
+    return this.store.handleForSendCredential(sendCredential)
   }
 }
