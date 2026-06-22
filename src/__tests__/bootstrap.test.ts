@@ -102,4 +102,25 @@ describe("assemblePostgresStores", () => {
     expect(typeof pool.query).toBe("function")
     await (pool as unknown as { end(): Promise<void> }).end()
   })
+
+  it("the default pool factory attaches an 'error' handler so an idle-connection failure does NOT crash", async () => {
+    // pg-pool emits 'error' on an idle-client backend failure (DB failover / restart /
+    // network blip). On a bare EventEmitter, emitting 'error' with NO listener THROWS
+    // (the process would crash). The factory must attach a listener that logs a STATIC
+    // event only — never the connection string or the error detail (which could carry
+    // content). The error below carries a secret-looking payload that must NOT leak.
+    const logger = new MemoryLogger()
+    const LEAK = "postgres://user:s3cr3t@db.internal:5432/relay leaked-detail"
+    const pool = defaultPoolFactory("postgres://user:pass@localhost:5432/db?sslmode=require", logger)
+    // Emit the idle-client error synchronously. With the handler attached this returns
+    // normally (handled); without it, emit('error', …) would throw → crash.
+    ;(pool as unknown as { emit(ev: string, err: Error): boolean }).emit("error", new Error(LEAK))
+    const errs = logger.entries.filter((e) => e.level === "error")
+    expect(errs).toHaveLength(1)
+    expect(errs[0].event).toBe("pg_pool_error")
+    // The connection string / error detail appears NOWHERE in the captured log.
+    expect(JSON.stringify(logger.entries).includes("s3cr3t")).toBe(false)
+    expect(JSON.stringify(logger.entries).includes("leaked-detail")).toBe(false)
+    await (pool as unknown as { end(): Promise<void> }).end()
+  })
 })

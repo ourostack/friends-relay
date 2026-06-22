@@ -64,14 +64,28 @@ export interface PostgresStores {
 }
 
 /** A factory that builds a pg-compatible pool from a connection string. Injectable so
- * tests pass a pg-mem pool (fully hermetic); the default builds a real `pg` Pool. */
-export type PoolFactory = (databaseUrl: string) => PgPool
+ * tests pass a pg-mem pool (fully hermetic); the default builds a real `pg` Pool. The
+ * optional `logger` is used by the default factory for the pool's `'error'` listener
+ * (a static event only); injected test factories ignore it. */
+export type PoolFactory = (databaseUrl: string, logger?: Logger) => PgPool
 
 /** The production pool factory: a real `pg` Pool over the connection string. `pg`
  * connects LAZILY (on first query), so constructing the pool opens no socket; the
- * actual connect happens when `migrate` first queries. */
-export function defaultPoolFactory(databaseUrl: string): PgPool {
-  return new Pool({ connectionString: databaseUrl }) as unknown as PgPool
+ * actual connect happens when `migrate` first queries.
+ *
+ * It attaches an `'error'` listener: `pg-pool` emits `'error'` on an IDLE-client
+ * backend failure (a DB failover / restart / network blip on a pooled connection that
+ * is not currently executing a query). With NO listener, node's EventEmitter THROWS on
+ * `emit('error', …)` → the process crashes. The listener logs a STATIC event name only
+ * (`pg_pool_error`) — it deliberately does NOT pass the error (or the connection
+ * string) into the log, so nothing that could carry the connection string / content
+ * can leak. */
+export function defaultPoolFactory(databaseUrl: string, logger: Logger = silentLogger): PgPool {
+  const pool = new Pool({ connectionString: databaseUrl })
+  pool.on("error", () => {
+    logger.log("error", "pg_pool_error")
+  })
+  return pool as unknown as PgPool
 }
 
 /** Construct the four Pg adapters around an ALREADY-CONNECTED, ALREADY-MIGRATED pool.
@@ -90,13 +104,15 @@ export function buildPostgresStores(pool: PgPool, bounds: InboxBounds): Postgres
 /** Create the Postgres pool (via `poolFactory`), run the idempotent schema
  * migration, and return the four durable stores. This is the async pool/migrate work
  * that `assembleRelay` deliberately stays out of; `bin.ts` calls this then passes the
- * result into `assembleRelay`. */
+ * result into `assembleRelay`. `logger` is forwarded to the pool factory so the default
+ * factory's `'error'` listener can log a static event (it defaults to `silentLogger`). */
 export async function assemblePostgresStores(
   databaseUrl: string,
   bounds: InboxBounds,
   poolFactory: PoolFactory = defaultPoolFactory,
+  logger: Logger = silentLogger,
 ): Promise<PostgresStores> {
-  const pool = poolFactory(databaseUrl)
+  const pool = poolFactory(databaseUrl, logger)
   await migrate(pool)
   return buildPostgresStores(pool, bounds)
 }
