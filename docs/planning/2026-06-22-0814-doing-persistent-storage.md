@@ -211,3 +211,5 @@ The Postgres parity assertion (Unit 7) must: enqueue this sealed message via the
 
 ## Progress Log
 - 2026-06-22 08:14 Created from planning doc (Pass 1 first draft). Baked in the 5 resolved answers (Postgres + pure-JS `pg`; two new InviteStore/CredentialStore interfaces; rate-limiter buckets stay ephemeral; replica-moot; `pg-mem` hermetic fake). Validated against HEAD: confirmed the server side is fully synchronous and made the async-seam conversion an explicit foundational Unit 1 ahead of the adapters.
+- 2026-06-22 08:23 Pass 1 committed.
+- 2026-06-22 08:23 Pass 2 (granularity): every feature already split tests→impl→coverage (a/b/c); each sub-unit atomic + one-session + has What/Acceptance. Confirmed Unit 0 (deps + 4-table DDL) is a legitimately-bundled setup unit (DDL is one cohesive deliverable); no further breakdown needed. No structural changes.
