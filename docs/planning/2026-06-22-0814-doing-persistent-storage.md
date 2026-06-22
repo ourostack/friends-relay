@@ -119,7 +119,7 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **Output**: lockfile updated; `schema.ts` with exported DDL strings + a `migrate(pool)` that runs them idempotently (`create table if not exists` / `create index if not exists`).
 **Acceptance**: `npm install` clean; `npm run typecheck` resolves `pg`/`pg-mem` types; DDL strings exist and are syntactically valid Postgres (verified by `pg-mem` accepting them in Unit 2's test bootstrap). No adapter logic yet.
 
-### ⬜ Unit 1a: Make the storage seam async — convert tests to await (RED)
+### ✅ Unit 1a: Make the storage seam async — convert tests to await (RED)
 **What**: Widen `InboxStore` + `RegistryStore` method signatures in `src/store/interfaces.ts` to return `Promise<…>`. Update the existing suites (`store.test.ts`, `relay.test.ts`, `http.test.ts` router block, `bootstrap.test.ts`, and the interop content-blind direct `inbox.list` call) to `await` the now-async API. Do NOT yet change the implementations.
 **Acceptance**: Tests are updated to `await` and the suite **FAILS to compile / FAILS** (red) because `Memory*`/`Relay`/`handle` still return sync values — confirming the spec is captured.
 
