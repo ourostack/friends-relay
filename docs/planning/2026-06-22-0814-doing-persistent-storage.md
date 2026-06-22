@@ -171,7 +171,7 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **What**: Confirm rotation revoke, revoke-absent no-op, exhausted-invite, unknown-invite, send-cred validate hit/miss all covered through the new seam.
 **Acceptance**: 100% coverage; green.
 
-### ⬜ Unit 5a: Postgres Invite + Credential adapters — tests (RED)
+### ✅ Unit 5a: Postgres Invite + Credential adapters — tests (RED)
 **What**: Hermetic `pg-mem` tests for `PgInviteStore` + `PgCredentialStore` covering issue/consume(decrement→delete at 0)/unknown/exhausted, and rotate(atomic replace old pair)/revoke/revoke-absent/handleForInboxAuth/canSendTo/handleForSendCredential — including the restart-survival case (fresh adapter over the same db still resolves credentials + remaining invite uses).
 **Acceptance**: Tests exist and FAIL.
 
