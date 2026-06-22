@@ -4,6 +4,12 @@
 # env (see src/config.ts). TLS is expected to terminate at an injected reverse proxy
 # (A2A requires HTTPS) — the image does not provision it.
 #
+# STORAGE BACKEND is env-selected (RELAY_STORE): `memory` (default, ephemeral) or
+# `postgres` (durable — survives restarts, needs DATABASE_URL). The Postgres driver
+# (`pg`) is PURE JAVASCRIPT — no native addon, so NO builder-stage toolchain change
+# is needed; `npm ci --ignore-scripts` installs it like any other dependency and the
+# same image serves both backends (the choice is made at runtime by env).
+#
 # Build:  docker build -t friends-relay .
 # Run:    docker run -p 8080:8080 \
 #           -e RELAY_PUBLIC_URL=https://relay.example \
