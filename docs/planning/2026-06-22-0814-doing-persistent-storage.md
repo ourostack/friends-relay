@@ -147,7 +147,7 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **What**: Hermetic `pg-mem` tests for `PgRegistryStore implements RegistryStore`: put/getByHandle/getByDid/remove, plus the two tricky semantics proven for the memory store — re-registration with a NEW did clears the stale did index, and `remove` does NOT clobber a did index re-pointed to another handle.
 **Acceptance**: Tests exist and FAIL.
 
-### ⬜ Unit 3b: Postgres RegistryStore adapter — implementation (GREEN)
+### ✅ Unit 3b: Postgres RegistryStore adapter — implementation (GREEN)
 **What**: Implement `PgRegistryStore` with `did` as a plain (non-unique) column so multiple handles may carry the same DID (the shared-DID case). Pin these query shapes (no alternatives):
 - `put` = `insert into registrations(handle,did,agent_card,key_agreement_pubkey,registered_at) values ($1,$2,$3,$4,$5) on conflict (handle) do update set did=excluded.did, agent_card=excluded.agent_card, key_agreement_pubkey=excluded.key_agreement_pubkey, registered_at=excluded.registered_at`.
 - `getByHandle` = `select * from registrations where handle=$1`.
@@ -155,7 +155,7 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 - `remove` = `delete from registrations where handle=$1 returning handle` (existence via `rowCount`). Because `getByDid` is computed by recency rather than a stored index, removing h1 cannot clobber h2's claim on a shared DID — the "remove must not clobber a re-pointed DID" contract holds for free. The "re-registration with a NEW did clears the stale did index" contract also holds: after h re-registers with a new DID, `getByDid(oldDid)` finds no row (h's row now carries the new DID and no other handle holds oldDid).
 **Acceptance**: Unit 3a tests PASS (incl. both tricky semantics); 100% coverage.
 
-### ⬜ Unit 3c: Postgres RegistryStore — coverage & refactor
+### ✅ Unit 3c: Postgres RegistryStore — coverage & refactor
 **What**: Confirm the shared-DID edge cases match memory semantics byte-for-byte; tidy queries.
 **Acceptance**: 100% coverage; green.
 
