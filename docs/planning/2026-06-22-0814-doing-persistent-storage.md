@@ -175,11 +175,11 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **What**: Hermetic `pg-mem` tests for `PgInviteStore` + `PgCredentialStore` covering issue/consume(decrement→delete at 0)/unknown/exhausted, and rotate(atomic replace old pair)/revoke/revoke-absent/handleForInboxAuth/canSendTo/handleForSendCredential — including the restart-survival case (fresh adapter over the same db still resolves credentials + remaining invite uses).
 **Acceptance**: Tests exist and FAIL.
 
-### ⬜ Unit 5b: Postgres Invite + Credential adapters — implementation (GREEN)
+### ✅ Unit 5b: Postgres Invite + Credential adapters — implementation (GREEN)
 **What**: Implement both against the Unit-0 schema. Invite consume = `update invites set remaining = remaining - 1 where token=$1 and remaining >= 1 returning remaining`, then delete at 0 (single statement or CTE). **GOTCHA (verified against pg-mem 3.0.14 in Pass 3): write arithmetic spaced — `remaining - 1`, NOT `remaining-1` — pg-mem's parser rejects the unspaced form** (`Unexpected int token "-1"`). Credential rotate = `insert … on conflict (handle) do update set inbox_auth=excluded.inbox_auth, send_credential=excluded.send_credential` (atomically supersedes the old pair; the unique reverse indexes mean the old tokens no longer resolve — verified). Reverse lookups = `select handle from credentials where inbox_auth=$1` / `where send_credential=$1`.
 **Acceptance**: Unit 5a tests PASS; 100% coverage; no `v8 ignore`.
 
-### ⬜ Unit 5c: Postgres Invite/Credential adapters — coverage & refactor
+### ✅ Unit 5c: Postgres Invite/Credential adapters — coverage & refactor
 **What**: Confirm every branch (exhausted vs unknown invite; rotate-with-prior vs first-time; revoke vs revoke-absent) is covered hermetically.
 **Acceptance**: 100% coverage; green.
 
