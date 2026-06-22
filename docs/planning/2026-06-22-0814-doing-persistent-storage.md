@@ -159,7 +159,7 @@ Verified in a scratch install (not the repo) that every SQL shape the adapters n
 **What**: Confirm the shared-DID edge cases match memory semantics byte-for-byte; tidy queries.
 **Acceptance**: 100% coverage; green.
 
-### ⬜ Unit 4a: Extract InviteStore + CredentialStore seams — tests (RED)
+### ✅ Unit 4a: Extract InviteStore + CredentialStore seams — tests (RED)
 **What**: Define `InviteStore` + `CredentialStore` interfaces (in `src/store/interfaces.ts`, async). Refactor `InviteManager`/`CredentialManager` to take a store and become thin logic-over-store; add in-memory impls (`MemoryInviteStore`, `MemoryCredentialStore`). Write/adjust `security.test.ts` (and `relay.test.ts`'s construction) to inject the in-memory stores and `await`. **Pinned seam shape (no alternative): add `invites: InviteStore` + `credentials: CredentialStore` to `RelayDeps` (and to `AssembleOverrides`); `Relay`'s constructor builds `InviteManager`/`CredentialManager` over those injected stores — exactly mirroring how it already builds `RateLimiter` from `deps.config`/`deps.clock`. `Relay` stops owning the managers' state but keeps owning the managers.** The `InviteStore` surface = `issue(token, uses)` / `consume(token): boolean`-equivalent decomposed into the store primitives the manager needs (e.g. `setRemaining(token, n)`, `getRemaining(token)`, `decrementOrDelete(token): boolean`); the `CredentialStore` surface = `setCurrent(handle, pair)` / `getCurrent(handle)` / `deleteFor(handle, pair)` / `handleForInboxAuth(token)` / `handleForSendCredential(token)`. Keep the manager as the logic layer (the use-cap guard, the rotation revoke-then-mint sequencing) and the store as pure persistence.
 **Acceptance**: Tests updated to the seam + `await`, and FAIL (no stores/refactor yet).
 
