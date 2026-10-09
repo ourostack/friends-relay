@@ -34,6 +34,43 @@ jobs:
       - name: Run Coverage Gate
         run: npm run test:coverage
 
+  real-postgres:
+    # pg-mem (used by the coverage gate) accepts SQL that real Postgres rejects, so the
+    # Postgres adapters also run against a real server. The suite is skipped unless
+    # RELAY_TEST_DATABASE_URL is set; each test uses its own throwaway schema.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay
+          POSTGRES_DB: relay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U relay -d relay_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run real-Postgres suite
+        env:
+          RELAY_TEST_DATABASE_URL: postgresql://relay:relay@localhost:5432/relay_test
+        run: npm run test:real-pg
+
   docker-build:
     # Build the production image on every PR/push so a Dockerfile or build-stage
     # regression fails CI instead of slipping silently through to deploy (e.g. the
