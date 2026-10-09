@@ -54,6 +54,7 @@ export type EnqueueError =
   | "rate_limited"
   | "quota_count"
   | "quota_bytes"
+  | "busy"
   | "malformed_message"
   | "recipient_mismatch"
 
@@ -159,9 +160,12 @@ export class Relay {
   }
 
   /** Deregister a handle (auth'd by its inboxAuth at the HTTP layer). Revokes its
-   * credentials and removes the registration. Returns whether it existed. */
+   * credentials, purges its queued messages and removes the registration. Returns whether it existed. */
   async deregister(handle: string): Promise<boolean> {
     await this.credentials.revoke(handle)
+    // Drop the previous owner's queued mail: the next registrant of this handle must
+    // not inherit it.
+    await this.deps.inbox.purge(handle)
     const existed = await this.deps.registry.remove(handle)
     if (existed) {
       this.deps.logger.log("info", "deregistered", { handle, decision: "deregistered" })

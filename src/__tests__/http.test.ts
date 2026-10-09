@@ -1,6 +1,7 @@
 import { request as httpRequest } from "node:http"
 import type { IncomingMessage, Server } from "node:http"
 import { EventEmitter } from "node:events"
+import { PassThrough } from "node:stream"
 
 import { describe, expect, it } from "vitest"
 
@@ -780,5 +781,91 @@ describe("createServer — per-route caps, timeouts, failure cleanup, aborted bo
     } finally {
       await close(server)
     }
+  })
+})
+
+describe("deregistration purges the inbox", () => {
+  it("a re-registrant of a deregistered handle does not receive the previous owner's queued messages", async () => {
+    const { relay } = makeRelay()
+    const first = await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: await relay.issueInvite() })
+    if (!first.ok) throw new Error("setup")
+    expect((await relay.enqueue({ handle: "h", sendCredential: first.grant.sendCredential, message: opaque() })).ok).toBe(true)
+    await relay.deregister("h")
+    const second = await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: await relay.issueInvite() })
+    if (!second.ok) throw new Error("setup")
+    const pulled = await relay.pull("h", second.grant.inboxAuth)
+    expect(pulled.ok && pulled.messages).toEqual([])
+  })
+})
+
+describe("body caps by route, readBody on a dead request, busy, request timeout guard", () => {
+  async function listen(server: Server): Promise<string> {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const addr = server.address()
+    if (!addr || typeof addr === "string") throw new Error("no address")
+    return `http://127.0.0.1:${addr.port}`
+  }
+  const close = (server: Server) => new Promise<void>((resolve) => server.close(() => resolve()))
+
+  it("readBody on a request destroyed before it was called settles as aborted (deterministic)", async () => {
+    const dead = new PassThrough()
+    dead.destroy()
+    await new Promise((r) => setImmediate(r)) // let the 'close' event fire BEFORE readBody listens
+    expect(await readBody(dead as unknown as IncomingMessage, 10)).toBe("aborted")
+  })
+
+  it("bodyless routes and unknown paths reject ANY body with 413; empty bodies still work", async () => {
+    const { relay, config } = makeRelay()
+    const server = createServer(config, relay, undefined, { drainGraceMs: 50 })
+    const base = await listen(server)
+    try {
+      for (const [method, path] of [["GET", "/healthz"], ["POST", "/inbox/h/ack/q1"], ["POST", "/nowhere"], ["GET", "/directory/h"]] as const) {
+        const res = await fetch(`${base}${path}`, { method, body: "x" }).catch(() => undefined)
+        // fetch refuses a GET body client-side; use a raw request for those
+        if (res) expect(res.status).toBe(413)
+      }
+      const raw = await new Promise<number>((resolve) => {
+        const r = httpRequest(`${base}/healthz`, { method: "GET", headers: { "content-length": "5" } }, (res) => {
+          res.resume()
+          resolve(res.statusCode as number)
+        })
+        r.on("error", () => undefined)
+        r.write("hello")
+      })
+      expect(raw).toBe(413)
+      expect((await fetch(`${base}/healthz`)).status).toBe(200)
+      expect((await fetch(`${base}/nowhere`, { method: "POST" })).status).toBe(404)
+    } finally {
+      await close(server)
+    }
+  })
+
+  it("an unknown path with a chunked body is refused while streaming", async () => {
+    const { relay, config } = makeRelay()
+    const server = createServer(config, relay, undefined, { drainGraceMs: 50 })
+    const base = await listen(server)
+    try {
+      async function* gen() {
+        yield "abc"
+      }
+      const res = await fetch(`${base}/nowhere`, { method: "POST", body: gen() as never, duplex: "half" } as RequestInit)
+      expect(res.status).toBe(413)
+    } finally {
+      await close(server)
+    }
+  })
+
+  it("maps a busy inbox to 503", async () => {
+    const { config } = makeRelay()
+    const busy = { enqueue: () => Promise.resolve({ ok: false, error: "busy" }) } as unknown as Relay
+    const res = await handle(config, busy, { method: "POST", path: "/a2a/h", headers: {}, bearer: "x", body: opaque() })
+    expect(res).toEqual({ status: 503, body: { error: "busy" } })
+  })
+
+  it("requestTimeoutMs: 0 does not disable the header timeout", () => {
+    const { relay, config } = makeRelay()
+    const s = createServer(config, relay, undefined, { requestTimeoutMs: 0 })
+    expect(s.requestTimeout).toBe(30_000)
+    expect(s.headersTimeout).toBeGreaterThan(0)
   })
 })

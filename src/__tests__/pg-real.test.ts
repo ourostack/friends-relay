@@ -10,7 +10,7 @@ import { loadConfig } from "../config"
 import { MemoryLogger } from "../logger"
 import { SequenceTokenSource } from "../security/tokens"
 import { assemblePostgresStores, assembleRelay } from "../server/bootstrap"
-import { PgInboxStore } from "../store/postgres/inbox"
+import { ADVISORY_LOCK_CLASS_ID, PgInboxStore } from "../store/postgres/inbox"
 import { PgRegistryStore } from "../store/postgres/registry"
 import { createRealPg, REAL_PG_ENV } from "./pg-harness"
 import type { RealPgHandle } from "./pg-harness"
@@ -125,6 +125,34 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
       expect(results.filter((r) => r.ok)).toHaveLength(5)
       expect(results.filter((r) => !r.ok).every((r) => !r.ok && r.reason === "quota_count")).toBe(true)
       expect(await inbox.depth("h", 0)).toBe(5)
+    })
+
+    it("purge removes one handle's queue", async () => {
+      const inbox = new PgInboxStore(pg.newPool(), BOUNDS)
+      await enq(inbox, "h")
+      await enq(inbox, "h")
+      await enq(inbox, "other")
+      expect(await inbox.purge("h")).toBe(2)
+      expect(await inbox.depth("h", 0)).toBe(0)
+      expect(await inbox.depth("other", 0)).toBe(1)
+    })
+
+    it("an enqueue stuck behind a held per-handle lock gives up as busy (55P03), then works once released", async () => {
+      const inbox = new PgInboxStore(pg.newPool(), BOUNDS, { lockTimeoutMs: 200 })
+      const holder = await pg.newPool().connect()
+      await holder.query("begin")
+      await holder.query(`select pg_advisory_xact_lock(${ADVISORY_LOCK_CLASS_ID}, hashtext($1))`, ["h"])
+      try {
+        const started = Date.now()
+        expect(await enq(inbox, "h")).toEqual({ ok: false, reason: "busy" })
+        expect(Date.now() - started).toBeLessThan(3000)
+        // a different handle is not blocked by that lock
+        expect((await enq(inbox, "other")).ok).toBe(true)
+      } finally {
+        await holder.query("rollback")
+        holder.release()
+      }
+      expect((await enq(inbox, "h")).ok).toBe(true)
     })
 
     it("queued messages and FIFO order survive a restart (fresh pool, same schema)", async () => {

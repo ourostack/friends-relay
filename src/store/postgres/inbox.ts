@@ -20,13 +20,34 @@ import type { A2AMessage, QueuedMessage } from "../../types"
  * advisory lock normally prevents it; this is a fallback.) */
 const SERIALIZATION_FAILURE = "40001"
 
+/** PostgreSQL's `deadlock_detected` SQLSTATE — also transient; retried like 40001. */
+const DEADLOCK_DETECTED = "40P01"
+
+/** PostgreSQL's `lock_not_available` SQLSTATE — raised when `lock_timeout` expires
+ * while waiting for the per-handle lock. Reported to the caller as "busy" (HTTP 503). */
+const LOCK_NOT_AVAILABLE = "55P03"
+
+/** Class id of the two-key advisory lock (ASCII "RELY"), so this relay's locks cannot
+ * collide with another application's advisory locks in the same database. */
+export const ADVISORY_LOCK_CLASS_ID = 1380272473
+
+/** How long an enqueue waits for the per-handle lock before reporting "busy". */
+const DEFAULT_LOCK_TIMEOUT_MS = 5000
+
 /** Max attempts for the enqueue before giving up. A handful is plenty —
  * a contended handle resolves in 1–2 retries; this just bounds a pathological loop. */
 const MAX_ENQUEUE_ATTEMPTS = 5
 
-/** Whether an unknown thrown value is a Postgres serialization failure (so we retry). */
-function isSerializationFailure(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === SERIALIZATION_FAILURE
+/** The SQLSTATE of an unknown thrown value, if it carries one. */
+function sqlState(err: unknown): unknown {
+  return typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined
+}
+
+/** Whether a thrown value is a transient Postgres conflict (serialization failure or
+ * deadlock), so the whole transaction should be retried. */
+function isRetryable(err: unknown): boolean {
+  const code = sqlState(err)
+  return code === SERIALIZATION_FAILURE || code === DEADLOCK_DETECTED
 }
 
 /** A row shape as read back from the `inbox` table. `message` is the opaque jsonb
@@ -46,6 +67,7 @@ export class PgInboxStore implements InboxStore {
   constructor(
     private readonly pool: PgPool,
     private readonly bounds: InboxBounds,
+    private readonly options: { lockTimeoutMs?: number } = {},
   ) {}
 
   async enqueue(input: {
@@ -69,7 +91,10 @@ export class PgInboxStore implements InboxStore {
         return result
       } catch (err) {
         await rollbackQuietly(client)
-        if (isSerializationFailure(err) && attempt < MAX_ENQUEUE_ATTEMPTS) {
+        if (sqlState(err) === LOCK_NOT_AVAILABLE) {
+          return { ok: false, reason: "busy" } // the handle's lock was held too long
+        }
+        if (isRetryable(err) && attempt < MAX_ENQUEUE_ATTEMPTS) {
           continue // transient conflict — retry the whole transaction
         }
         throw err
@@ -80,7 +105,7 @@ export class PgInboxStore implements InboxStore {
   }
 
   /** One attempt of the atomic enqueue on a checked-out client. BEGIN (READ COMMITTED)
-   * → take a transaction-scoped advisory lock keyed on the handle (FIRST statement, so
+   * → take a transaction-scoped advisory lock (namespaced two-key form) on the handle (FIRST statement, so
    * every later statement takes its snapshot after the lock is held and sees prior
    * committed enqueues; it works even for a handle with no registry or inbox row) →
    * prune expired (drop-on-enqueue) → read live count+bytes → enforce both bounds
@@ -92,7 +117,9 @@ export class PgInboxStore implements InboxStore {
     input: { handle: string; message: A2AMessage; enqueuedAt: number; expiresAt: number; sizeBytes: number },
   ): Promise<EnqueueResult> {
     await client.query(`begin`)
-    await client.query(`select pg_advisory_xact_lock(hashtextextended($1, 0))`, [input.handle])
+    // Bound the wait for the lock (an integer literal: SET LOCAL takes no parameters).
+    await client.query(`set local lock_timeout = ${Math.trunc(this.options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS)}`)
+    await client.query(`select pg_advisory_xact_lock(${ADVISORY_LOCK_CLASS_ID}, hashtext($1))`, [input.handle])
     await client.query(`delete from inbox where handle = $1 and expires_at <= $2`, [input.handle, input.enqueuedAt])
     const agg = await client.query(
       `select count(*)::int as n, coalesce(sum(size_bytes), 0)::int as bytes
@@ -143,6 +170,11 @@ export class PgInboxStore implements InboxStore {
 
   async dropExpired(now: number): Promise<number> {
     const res = await this.pool.query(`delete from inbox where expires_at <= $1 returning queue_id`, [now])
+    return res.rows.length
+  }
+
+  async purge(handle: string): Promise<number> {
+    const res = await this.pool.query(`delete from inbox where handle = $1 returning queue_id`, [handle])
     return res.rows.length
   }
 

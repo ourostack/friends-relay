@@ -54,6 +54,8 @@ function enqueueStatus(error: string): number {
       return 403
     case "rate_limited":
       return 429
+    case "busy":
+      return 503
     case "quota_count":
     case "quota_bytes":
       return 507
@@ -277,11 +279,29 @@ export async function authorizeBeforeBody(config: RelayConfig, relay: Relay, req
   return undefined
 }
 
+/** The body cap for a request: the configured cap only for the send route (whose
+ * credential was checked before the body), 64 KiB for the other routes that take a
+ * JSON body, and 0 (any body is refused) for every route that takes none, including
+ * unknown paths. */
+export function bodyLimitFor(req: RelayRequest, limit: number): number {
+  if (req.method === "POST") {
+    if (/^\/a2a\/[^/]+$/.test(req.path)) return limit
+    if (req.path === "/register" || req.path === "/admin/invites") return Math.min(limit, SMALL_BODY_BYTES)
+  }
+  return 0
+}
+
 /** Read the request body. Settles with the body, "too_large" as soon as more than
  * `limit` bytes arrive, or "aborted" if the client closes or errors first (so the
  * promise can never hang on a dead connection). */
 export function readBody(req: IncomingMessage, limit: number): Promise<Buffer | "too_large" | "aborted"> {
   return new Promise((resolve) => {
+    // The client may have gone while we awaited the pre-body auth check: its 'close' /
+    // 'error' already fired, before any listener below existed.
+    if (req.destroyed) {
+      resolve("aborted")
+      return
+    }
     const chunks: Buffer[] = []
     let size = 0
     const done = (v: Buffer | "too_large" | "aborted"): void => {
@@ -334,7 +354,8 @@ const PAYLOAD_TOO_LARGE: RelayResponse = { status: 413, body: { error: "payload_
 export function createServer(config: RelayConfig, relay: Relay, logger: Logger = silentLogger, options: ServerOptions = {}): Server {
   const limit = options.maxBodyBytes ?? config.maxBodyBytes
   const graceMs = options.drainGraceMs ?? DRAIN_GRACE_MS
-  const requestTimeout = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
+  // A zero/negative timeout would disable Node's check (and zero the header timeout).
+  const requestTimeout = options.requestTimeoutMs && options.requestTimeoutMs > 0 ? options.requestTimeoutMs : REQUEST_TIMEOUT_MS
   const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
     // The handler is async + can REJECT (the storage seam is async — a Postgres
     // query can throw mid-request). Without this `.catch` the socket would hang
@@ -352,9 +373,9 @@ export function createServer(config: RelayConfig, relay: Relay, logger: Logger =
         return
       }
       // 2. A declared length over the cap is refused up front; an undeclared or
-      //    understated one is caught while streaming. The small JSON routes get a
-      //    tighter cap than the message-carrying send route.
-      const routeLimit = head.method === "POST" && (head.path === "/register" || head.path === "/admin/invites") ? Math.min(limit, SMALL_BODY_BYTES) : limit
+      //    understated one is caught while streaming. Only the (already
+      //    authorised) send route gets the full cap.
+      const routeLimit = bodyLimitFor(head, limit)
       if (Number(headers["content-length"]) > routeLimit) {
         respondAndClose(req, res, PAYLOAD_TOO_LARGE, graceMs)
         return

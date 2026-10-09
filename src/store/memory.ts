@@ -95,6 +95,12 @@ export class MemoryInboxStore implements InboxStore {
     return dropped
   }
 
+  async purge(handle: string): Promise<number> {
+    const n = this.queues.get(handle)?.length ?? 0
+    this.queues.delete(handle)
+    return n
+  }
+
   async depth(handle: string, now: number): Promise<number> {
     return this.livePrune(handle, now).length
   }

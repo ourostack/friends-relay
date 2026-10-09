@@ -33,10 +33,10 @@ export interface PgMemHandle {
  * about the DDL the adapters run. */
 export function makePgMem(): PgMemHandle {
   const db = newDb({ noAstCoverageCheck: true })
-  // pg-mem is single-threaded and has no advisory locks or hashtextextended; the inbox
+  // pg-mem is single-threaded and has no advisory locks or hashtext; the inbox
   // enqueue calls them, so stub them (the real behaviour is proven in pg-real.test.ts).
-  db.public.registerFunction({ name: "hashtextextended", args: [DataType.text, DataType.integer], returns: DataType.integer, implementation: () => 0 })
-  db.public.registerFunction({ name: "pg_advisory_xact_lock", args: [DataType.integer], returns: DataType.bool, implementation: () => true })
+  db.public.registerFunction({ name: "hashtext", args: [DataType.text], returns: DataType.integer, implementation: () => 0 })
+  db.public.registerFunction({ name: "pg_advisory_xact_lock", args: [DataType.integer, DataType.integer], returns: DataType.bool, implementation: () => true })
   return {
     db,
     newPool(): PgPool {

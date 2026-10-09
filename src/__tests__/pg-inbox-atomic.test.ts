@@ -11,7 +11,7 @@
 //   - a rollback that itself throws does not mask the original error.
 import { describe, expect, it } from "vitest"
 
-import { PgInboxStore } from "../store/postgres/inbox"
+import { ADVISORY_LOCK_CLASS_ID, PgInboxStore } from "../store/postgres/inbox"
 import type { PgPool, PgPoolClient } from "../store/postgres/schema"
 import type { A2AMessage } from "../types"
 
@@ -36,6 +36,8 @@ interface FakePoolControl {
   attempts: number
   /** SQL verbs seen across all attempts (lowercased first word). */
   verbs: string[]
+  /** Full SQL text of every statement, in order. */
+  sql: string[]
   /** Committed inserts (a successful txn pushes one). */
   inserts: number
   pool: PgPool
@@ -44,12 +46,16 @@ interface FakePoolControl {
 function makeFakePool(opts: {
   /** Throw this from `commit` on attempts 1..failCommits (then succeed). */
   failCommits?: number
+  /** The SQLSTATE the failing commits raise (default 40001). */
+  failCode?: string
+  /** If set, the advisory-lock statement (the first `select`) throws this SQLSTATE. */
+  lockFailsWith?: string
   /** If set, throw this (non-40001) once at the first `commit`. */
   throwAtCommit?: () => Error
   /** If true, the client's `rollback` itself throws (to cover rollbackQuietly's catch). */
   rollbackThrows?: boolean
 }): FakePoolControl {
-  const ctrl: FakePoolControl = { attempts: 0, verbs: [], inserts: 0, pool: null as unknown as PgPool }
+  const ctrl: FakePoolControl = { attempts: 0, verbs: [], sql: [], inserts: 0, pool: null as unknown as PgPool }
   let pendingInsert = false
   ctrl.pool = {
     async query() {
@@ -63,6 +69,7 @@ function makeFakePool(opts: {
         async query(text: string) {
           const verb = text.trim().split(/\s+/)[0].toLowerCase()
           ctrl.verbs.push(verb)
+          ctrl.sql.push(text)
           if (verb === "insert") {
             pendingInsert = true
           }
@@ -74,12 +81,15 @@ function makeFakePool(opts: {
               throw opts.throwAtCommit()
             }
             if (opts.failCommits && thisAttempt <= opts.failCommits) {
-              throw serializationError()
+              throw opts.failCode ? Object.assign(new Error("retryable"), { code: opts.failCode }) : serializationError()
             }
             if (pendingInsert) ctrl.inserts++
           }
           // `select count/sum` → return an under-cap aggregate so the insert path runs.
           if (verb === "select") {
+            if (opts.lockFailsWith && text.includes("pg_advisory_xact_lock")) {
+              throw Object.assign(new Error("canceling statement due to lock timeout"), { code: opts.lockFailsWith })
+            }
             return { rows: [{ n: 0, bytes: 0 }], rowCount: 1 }
           }
           return { rows: [], rowCount: 0 }
@@ -130,6 +140,35 @@ describe("RF4 — PgInboxStore atomic enqueue: serialization-failure retry seman
     const ctrl = makeFakePool({ throwAtCommit: () => new Error("original failure"), rollbackThrows: true })
     const store = new PgInboxStore(ctrl.pool, BOUNDS)
     await expect(store.enqueue(ENQ)).rejects.toThrow("original failure")
+    expect(ctrl.attempts).toBe(1)
+  })
+
+  it("also retries a 40P01 deadlock", async () => {
+    const ctrl = makeFakePool({ failCommits: 1, failCode: "40P01" })
+    const res = await new PgInboxStore(ctrl.pool, BOUNDS).enqueue(ENQ)
+    expect(res.ok).toBe(true)
+    expect(ctrl.attempts).toBe(2)
+    expect(ctrl.inserts).toBe(1)
+  })
+
+  it("bounds the wait for the per-handle lock and namespaces the advisory key", async () => {
+    const ctrl = makeFakePool({})
+    await new PgInboxStore(ctrl.pool, BOUNDS, { lockTimeoutMs: 1234 }).enqueue(ENQ)
+    expect(ctrl.sql[0].trim()).toBe("begin")
+    expect(ctrl.sql[1]).toBe("set local lock_timeout = 1234")
+    expect(ctrl.sql[2]).toContain(`pg_advisory_xact_lock(${ADVISORY_LOCK_CLASS_ID}, hashtext($1))`)
+  })
+
+  it("a lock timeout (55P03) is reported as busy, not thrown, and not retried", async () => {
+    const ctrl = makeFakePool({ lockFailsWith: "55P03" })
+    expect(await new PgInboxStore(ctrl.pool, BOUNDS).enqueue(ENQ)).toEqual({ ok: false, reason: "busy" })
+    expect(ctrl.attempts).toBe(1)
+    expect(ctrl.verbs).toContain("rollback")
+  })
+
+  it.each([["a string", "boom"], ["null", null]])("a thrown non-object (%s) propagates without a retry", async (_label, thrown) => {
+    const ctrl = makeFakePool({ throwAtCommit: () => thrown as unknown as Error })
+    await expect(new PgInboxStore(ctrl.pool, BOUNDS).enqueue(ENQ)).rejects.toBe(thrown)
     expect(ctrl.attempts).toBe(1)
   })
 })
