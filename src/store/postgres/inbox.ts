@@ -15,12 +15,12 @@ import type { EnqueueResult, InboxStore } from "../interfaces"
 import type { PgPool, PgPoolClient } from "./schema"
 import type { A2AMessage, QueuedMessage } from "../../types"
 
-/** PostgreSQL's `serialization_failure` SQLSTATE — raised under SERIALIZABLE when a
- * concurrent transaction makes this one's reads/writes non-serializable. The correct
- * response is to roll back and RETRY (the conflict is transient). */
+/** PostgreSQL's `serialization_failure` SQLSTATE — a transient conflict between
+ * concurrent transactions. The correct response is to roll back and RETRY. (The
+ * advisory lock normally prevents it; this is a fallback.) */
 const SERIALIZATION_FAILURE = "40001"
 
-/** Max attempts for the SERIALIZABLE enqueue before giving up. A handful is plenty —
+/** Max attempts for the enqueue before giving up. A handful is plenty —
  * a contended handle resolves in 1–2 retries; this just bounds a pathological loop. */
 const MAX_ENQUEUE_ATTEMPTS = 5
 
@@ -58,10 +58,10 @@ export class PgInboxStore implements InboxStore {
     // The bound-enforcing enqueue MUST be atomic: prune → count/sum → insert as three
     // separate autocommit statements let two concurrent posts to one handle both read
     // the same under-cap count/byte-sum and both insert, overshooting the quota. So the
-    // whole sequence runs in ONE SERIALIZABLE transaction — Postgres aborts a
-    // non-serializable interleaving with `40001`, which we roll back and RETRY. (Bare
-    // `FOR UPDATE` is insufficient: an empty handle has no rows to lock, so the cap
-    // race on a fresh handle is a phantom that only SERIALIZABLE detects.)
+    // whole sequence runs in ONE transaction whose FIRST statement takes a per-handle
+    // advisory lock (see enqueueTxn): concurrent posts to one handle queue up behind it
+    // and each sees the previous one's committed rows. The retry loop below is only a
+    // fallback for a transient serialization failure (40001) or deadlock (40P01).
     for (let attempt = 1; ; attempt++) {
       const client = await this.pool.connect()
       try {
@@ -79,9 +79,11 @@ export class PgInboxStore implements InboxStore {
     }
   }
 
-  /** One attempt of the atomic enqueue on a checked-out client. BEGIN SERIALIZABLE →
-   * prune expired (drop-on-enqueue) → lock the recipient's registry row (so concurrent
-   * posts to this handle queue up) → read live count+bytes → enforce both bounds
+  /** One attempt of the atomic enqueue on a checked-out client. BEGIN (READ COMMITTED)
+   * → take a transaction-scoped advisory lock keyed on the handle (FIRST statement, so
+   * every later statement takes its snapshot after the lock is held and sees prior
+   * committed enqueues; it works even for a handle with no registry or inbox row) →
+   * prune expired (drop-on-enqueue) → read live count+bytes → enforce both bounds
    * (count-first, exact reasons — mirrors MemoryInboxStore) → conditional INSERT →
    * COMMIT. A quota rejection still COMMITs (the prune is a legitimate, committable
    * side effect); only an error rolls back (handled by the caller). */
@@ -89,12 +91,8 @@ export class PgInboxStore implements InboxStore {
     client: PgPoolClient,
     input: { handle: string; message: A2AMessage; enqueuedAt: number; expiresAt: number; sizeBytes: number },
   ): Promise<EnqueueResult> {
-    await client.query(`begin isolation level serializable`)
-    // Serialize concurrent posts to this recipient by locking its single registry row.
-    // (`FOR UPDATE` is not allowed on an aggregate query, and an empty inbox has no
-    // inbox rows to lock.) A handle with no registry row locks nothing and relies on
-    // SERIALIZABLE alone; the relay only enqueues to registered handles.
-    await client.query(`select handle from registrations where handle = $1 for update`, [input.handle])
+    await client.query(`begin`)
+    await client.query(`select pg_advisory_xact_lock(hashtextextended($1, 0))`, [input.handle])
     await client.query(`delete from inbox where handle = $1 and expires_at <= $2`, [input.handle, input.enqueuedAt])
     const agg = await client.query(
       `select count(*)::int as n, coalesce(sum(size_bytes), 0)::int as bytes

@@ -7,7 +7,7 @@
 import { randomBytes } from "node:crypto"
 
 import { Pool } from "pg"
-import { newDb } from "pg-mem"
+import { DataType, newDb } from "pg-mem"
 import type { IMemoryDb } from "pg-mem"
 
 import type { PgPool } from "../store/postgres/schema"
@@ -33,6 +33,10 @@ export interface PgMemHandle {
  * about the DDL the adapters run. */
 export function makePgMem(): PgMemHandle {
   const db = newDb({ noAstCoverageCheck: true })
+  // pg-mem is single-threaded and has no advisory locks or hashtextextended; the inbox
+  // enqueue calls them, so stub them (the real behaviour is proven in pg-real.test.ts).
+  db.public.registerFunction({ name: "hashtextextended", args: [DataType.text, DataType.integer], returns: DataType.integer, implementation: () => 0 })
+  db.public.registerFunction({ name: "pg_advisory_xact_lock", args: [DataType.integer], returns: DataType.bool, implementation: () => true })
   return {
     db,
     newPool(): PgPool {
