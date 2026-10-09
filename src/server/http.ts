@@ -9,6 +9,7 @@
 import { createServer as createHttpServer } from "node:http"
 import type { IncomingMessage, Server, ServerResponse } from "node:http"
 
+import { DEFAULT_MAX_BODY_BYTES } from "../config"
 import type { RelayConfig } from "../config"
 import { silentLogger } from "../logger"
 import type { Logger } from "../logger"
@@ -228,18 +229,26 @@ export function toRelayRequest(input: {
   }
 }
 
-/** The default cap on a request body: 1 MiB. Every JSON body this relay accepts (an
- * invite request, a registration, one sealed message bounded by the inbox byte quota)
- * is far smaller; anything bigger is refused before it can be buffered into memory. */
-export const MAX_BODY_BYTES = 1024 * 1024
+/** The default cap on a request body: 1 MiB (configurable via `RELAY_MAX_BODY_BYTES`).
+ * A body over the cap is refused with 413 before it can be buffered into memory. It is
+ * independent of the per-handle inbox byte quota: raise both for larger messages. */
+export const MAX_BODY_BYTES = DEFAULT_MAX_BODY_BYTES
 
-/** Tunables for `createServer`. */
+/** The tighter cap for the small JSON bodies of `/register` and `/admin/invites`. */
+export const SMALL_BODY_BYTES = 64 * 1024
+
+/** Default time a request may take to arrive in full (slow-upload defence). */
+export const REQUEST_TIMEOUT_MS = 30_000
+
+/** Tunables for `createServer`; each defaults from `RelayConfig` or a constant. */
 export interface ServerOptions {
-  /** Maximum request body in bytes (default `MAX_BODY_BYTES`). */
+  /** Maximum request body in bytes (default `config.maxBodyBytes`). */
   maxBodyBytes?: number
   /** How long to keep discarding an unread body after an early rejection before the
    * connection is destroyed (default `DRAIN_GRACE_MS`). */
   drainGraceMs?: number
+  /** Whole-request timeout; the header timeout is two thirds of it (default 30 s). */
+  requestTimeoutMs?: number
 }
 
 /** Default grace for discarding an unread body after an early rejection. */
@@ -268,38 +277,52 @@ export async function authorizeBeforeBody(config: RelayConfig, relay: Relay, req
   return undefined
 }
 
-/** Read the request body, giving up (null) as soon as more than `limit` bytes arrive. */
-function readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
+/** Read the request body. Settles with the body, "too_large" as soon as more than
+ * `limit` bytes arrive, or "aborted" if the client closes or errors first (so the
+ * promise can never hang on a dead connection). */
+export function readBody(req: IncomingMessage, limit: number): Promise<Buffer | "too_large" | "aborted"> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let size = 0
+    const done = (v: Buffer | "too_large" | "aborted"): void => {
+      req.off("data", onData)
+      req.off("end", onEnd)
+      req.off("close", onAbort)
+      req.off("error", onAbort)
+      resolve(v)
+    }
     const onData = (c: Buffer): void => {
       size += c.length
-      if (size > limit) {
-        req.off("data", onData)
-        req.off("end", onEnd)
-        resolve(null)
-        return
-      }
-      chunks.push(c)
+      if (size > limit) done("too_large")
+      else chunks.push(c)
     }
-    const onEnd = (): void => resolve(Buffer.concat(chunks))
+    const onEnd = (): void => done(Buffer.concat(chunks))
+    const onAbort = (): void => done("aborted")
     req.on("data", onData)
     req.on("end", onEnd)
+    req.on("close", onAbort)
+    // Registered so a socket error is handled here instead of thrown as unhandled.
+    req.on("error", onAbort)
   })
 }
 
-/** Answer without having consumed the request body: discard (never
- * buffer) whatever the client is still sending so it can read the response instead of
- * hitting a reset (closing a socket with unread data resets it), and destroy the request after `graceMs` so a
- * client that never stops sending cannot hold the socket open. */
-function respondAndClose(req: IncomingMessage, res: ServerResponse, response: RelayResponse, graceMs: number): void {
-  res.writeHead(response.status, { "content-type": "application/json" })
-  res.end(JSON.stringify(response.body))
+/** Discard (never buffer) whatever the client is still sending, so it can read our
+ * response instead of hitting a reset (closing a socket with unread data resets it),
+ * and destroy the request after `graceMs` so a client that never stops sending cannot
+ * hold the socket open. A fully-read request needs no cleanup. */
+function discardRest(req: IncomingMessage, graceMs: number): void {
+  if (req.readableEnded) return
   req.resume()
   const timer = setTimeout(() => req.destroy(), graceMs)
   timer.unref()
   req.once("close", () => clearTimeout(timer))
+}
+
+/** Answer without having consumed the request body. */
+function respondAndClose(req: IncomingMessage, res: ServerResponse, response: RelayResponse, graceMs: number): void {
+  res.writeHead(response.status, { "content-type": "application/json" })
+  res.end(JSON.stringify(response.body))
+  discardRest(req, graceMs)
 }
 
 const PAYLOAD_TOO_LARGE: RelayResponse = { status: 413, body: { error: "payload_too_large" } }
@@ -309,9 +332,10 @@ const PAYLOAD_TOO_LARGE: RelayResponse = { status: 413, body: { error: "payload_
  * Postgres query throws mid-request) — it logs an event NAME only, never the error
  * message / connection string / any content (the relay is content-blind end to end). */
 export function createServer(config: RelayConfig, relay: Relay, logger: Logger = silentLogger, options: ServerOptions = {}): Server {
-  const limit = options.maxBodyBytes ?? MAX_BODY_BYTES
+  const limit = options.maxBodyBytes ?? config.maxBodyBytes
   const graceMs = options.drainGraceMs ?? DRAIN_GRACE_MS
-  return createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+  const requestTimeout = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
+  const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
     // The handler is async + can REJECT (the storage seam is async — a Postgres
     // query can throw mid-request). Without this `.catch` the socket would hang
     // forever (no response) AND the rejection would be unhandled. The catch writes a
@@ -328,13 +352,16 @@ export function createServer(config: RelayConfig, relay: Relay, logger: Logger =
         return
       }
       // 2. A declared length over the cap is refused up front; an undeclared or
-      //    understated one is caught while streaming.
-      if (Number(headers["content-length"]) > limit) {
+      //    understated one is caught while streaming. The small JSON routes get a
+      //    tighter cap than the message-carrying send route.
+      const routeLimit = head.method === "POST" && (head.path === "/register" || head.path === "/admin/invites") ? Math.min(limit, SMALL_BODY_BYTES) : limit
+      if (Number(headers["content-length"]) > routeLimit) {
         respondAndClose(req, res, PAYLOAD_TOO_LARGE, graceMs)
         return
       }
-      const buf = await readBody(req, limit)
-      if (buf === null) {
+      const buf = await readBody(req, routeLimit)
+      if (buf === "aborted") return // the client is gone; there is no one to answer
+      if (buf === "too_large") {
         respondAndClose(req, res, PAYLOAD_TOO_LARGE, graceMs)
         return
       }
@@ -358,6 +385,14 @@ export function createServer(config: RelayConfig, relay: Relay, logger: Logger =
         res.writeHead(500, { "content-type": "application/json" })
       }
       res.end(JSON.stringify({ error: "internal_error" }))
+      // The failure may have struck before the body was read (e.g. the auth lookup).
+      discardRest(req, graceMs)
     })
   })
+  // Slow-upload defence: a request (headers + body) must arrive within the timeout,
+  // and the connection count is bounded.
+  server.requestTimeout = requestTimeout
+  server.headersTimeout = Math.floor((requestTimeout * 2) / 3)
+  server.maxConnections = config.maxConnections
+  return server
 }

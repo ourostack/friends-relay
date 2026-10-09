@@ -24,6 +24,8 @@ function baseConfig(overrides: Partial<RelayConfig> = {}): RelayConfig {
     inboxBounds: { maxMessages: 3, maxBytes: 1_000_000 },
     messageTtlMs: 1000,
     sendRateLimit: { capacity: 5, refillPerSec: 1 },
+    maxBodyBytes: 1024 * 1024,
+    maxConnections: 1024,
     ...overrides,
   }
 }

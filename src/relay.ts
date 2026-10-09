@@ -169,6 +169,19 @@ export class Relay {
     return existed
   }
 
+  /** Cheap pre-body access check for the send route: the same handle-then-credential
+   * gate `enqueue` runs first, WITHOUT a message. The HTTP layer uses it to turn away
+   * an unauthorised sender before reading the request body. Returns the rejection
+   * `enqueue` would give, or null when the sender may proceed. */
+  async checkSendAccess(handle: string, sendCredential: string): Promise<"unknown_handle" | "bad_send_credential" | null> {
+    if (!(await this.deps.registry.getByHandle(handle))) return "unknown_handle"
+    if (!(await this.credentials.canSendTo(sendCredential, handle))) {
+      this.deps.logger.log("warn", "enqueue_rejected", { handle, reason: "bad_send_credential" })
+      return "bad_send_credential"
+    }
+    return null
+  }
+
   // ── enqueue (the send path: store-and-forward of CIPHERTEXT) ──────────────────
 
   /** Accept an opaque A2A message addressed to `handle` and queue it. Gated by:
@@ -177,16 +190,6 @@ export class Relay {
    * handle's registered DID (a sender can't smuggle a blob sealed to X into Y's
    * queue), (5) the per-handle quota + bound. Every failure is a DENIAL. The relay
    * NEVER reads the sealed content. */
-  /** Cheap pre-body access check for the send route: the same handle-then-credential
-   * gate `enqueue` runs first, WITHOUT a message. The HTTP layer uses it to turn away
-   * an unauthorised sender before reading the request body. Returns the rejection
-   * `enqueue` would give, or null when the sender may proceed. */
-  async checkSendAccess(handle: string, sendCredential: string): Promise<"unknown_handle" | "bad_send_credential" | null> {
-    if (!(await this.deps.registry.getByHandle(handle))) return "unknown_handle"
-    if (!(await this.credentials.canSendTo(sendCredential, handle))) return "bad_send_credential"
-    return null
-  }
-
   async enqueue(input: EnqueueInput): Promise<{ ok: true; queueId: string } | { ok: false; error: EnqueueError }> {
     const reg = await this.deps.registry.getByHandle(input.handle)
     if (!reg) {

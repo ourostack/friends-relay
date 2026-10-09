@@ -127,6 +127,8 @@ function relayConfig(overrides: Partial<RelayConfig> = {}): RelayConfig {
     inboxBounds: { maxMessages: 8, maxBytes: 1_000_000 },
     messageTtlMs: 10_000,
     sendRateLimit: { capacity: 100, refillPerSec: 1 },
+    maxBodyBytes: 1024 * 1024,
+    maxConnections: 1024,
     ...overrides,
   }
 }
