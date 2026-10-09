@@ -14,6 +14,7 @@ import type { RelayConfig } from "../config"
 import { silentLogger } from "../logger"
 import type { Logger } from "../logger"
 import type { Relay } from "../relay"
+import { isPoolTimeout } from "../store/postgres/schema"
 
 /** A transport-free representation of an HTTP request (so handlers are pure +
  * testable without a socket). */
@@ -27,12 +28,29 @@ export interface RelayRequest {
   headers: Record<string, string | undefined>
   /** The parsed JSON body (or undefined for no/empty body). */
   body?: unknown
+  /** Set by `createServer` once `authorizeBeforeBody` has already charged the send
+   * rate limit for this request. */
+  rateChecked?: boolean
 }
 
 /** A transport-free HTTP response. */
 export interface RelayResponse {
   status: number
   body: unknown
+}
+
+const BAD_REQUEST: RelayResponse = { status: 400, body: { error: "bad_request" } }
+
+/** Whether the path holds a malformed percent-escape. Checked once up front: if the
+ * whole path decodes, every segment of it does, so the later per-segment
+ * `decodeURIComponent` calls cannot throw. */
+function hasBadEncoding(path: string): boolean {
+  try {
+    decodeURIComponent(path)
+    return false
+  } catch {
+    return true
+  }
 }
 
 const JSON_404: RelayResponse = { status: 404, body: { error: "not_found" } }
@@ -79,6 +97,7 @@ function registerStatus(error: string): number {
 /** The pure router: (config, relay, request) → response. No sockets. Async because
  * the relay core is async (its storage seam is). */
 export async function handle(config: RelayConfig, relay: Relay, req: RelayRequest): Promise<RelayResponse> {
+  if (hasBadEncoding(req.path)) return BAD_REQUEST
   // ── liveness ──
   if (req.method === "GET" && req.path === "/healthz") {
     return { status: 200, body: { ok: true } }
@@ -135,7 +154,7 @@ export async function handle(config: RelayConfig, relay: Relay, req: RelayReques
   if (req.method === "POST" && a2aMatch) {
     const handle = decodeURIComponent(a2aMatch[1])
     const sendCredential = req.bearer ?? ""
-    const result = await relay.enqueue({ handle, sendCredential, message: req.body })
+    const result = await relay.enqueue({ handle, sendCredential, message: req.body, rateLimitChecked: req.rateChecked })
     if (!result.ok) {
       return { status: enqueueStatus(result.error), body: { error: result.error } }
     }
@@ -263,6 +282,7 @@ export const DRAIN_GRACE_MS = 1000
  * the A2A send. (Pull/ack/directory carry no body; /register is gated by an invite
  * token inside the body, so it relies on the size cap alone.) */
 export async function authorizeBeforeBody(config: RelayConfig, relay: Relay, req: RelayRequest): Promise<RelayResponse | undefined> {
+  if (hasBadEncoding(req.path)) return BAD_REQUEST
   if (req.method === "POST" && req.path === "/admin/invites") {
     return adminAllowed(config, req) ? undefined : { status: 401, body: { error: "unauthorized" } }
   }
@@ -356,7 +376,10 @@ export function createServer(config: RelayConfig, relay: Relay, logger: Logger =
   const graceMs = options.drainGraceMs ?? DRAIN_GRACE_MS
   // A zero/negative timeout would disable Node's check (and zero the header timeout).
   const requestTimeout = options.requestTimeoutMs && options.requestTimeoutMs > 0 ? options.requestTimeoutMs : REQUEST_TIMEOUT_MS
-  const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+  // Node enforces requestTimeout on a periodic sweep, so sweep at half the timeout
+  // (at most every 30 s): a slow upload is cut off between 1x and 1.5x the timeout.
+  const connectionsCheckingInterval = Math.max(1, Math.min(Math.floor(requestTimeout / 2), 30_000))
+  const server = createHttpServer({ connectionsCheckingInterval }, (req: IncomingMessage, res: ServerResponse) => {
     // The handler is async + can REJECT (the storage seam is async — a Postgres
     // query can throw mid-request). Without this `.catch` the socket would hang
     // forever (no response) AND the rejection would be unhandled. The catch writes a
@@ -397,15 +420,17 @@ export function createServer(config: RelayConfig, relay: Relay, logger: Logger =
           return
         }
       }
-      const response = await handle(config, relay, { ...head, body })
+      const response = await handle(config, relay, { ...head, body, rateChecked: true })
       res.writeHead(response.status, { "content-type": "application/json" })
       res.end(JSON.stringify(response.body))
-    })().catch(() => {
-      logger.log("error", "request_failed")
+    })().catch((err: unknown) => {
+      // A starved connection pool is overload, not a bug: tell the client to retry.
+      const busy = isPoolTimeout(err)
+      logger.log(busy ? "warn" : "error", busy ? "pool_busy" : "request_failed")
       if (!res.headersSent) {
-        res.writeHead(500, { "content-type": "application/json" })
+        res.writeHead(busy ? 503 : 500, { "content-type": "application/json" })
       }
-      res.end(JSON.stringify({ error: "internal_error" }))
+      res.end(JSON.stringify({ error: busy ? "busy" : "internal_error" }))
       // The failure may have struck before the body was read (e.g. the auth lookup).
       discardRest(req, graceMs)
     })

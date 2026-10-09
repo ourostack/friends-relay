@@ -177,4 +177,14 @@ describe("RF4 — PgInboxStore atomic enqueue: serialization-failure retry seman
     await expect(new PgInboxStore(ctrl.pool, BOUNDS).purge("h")).rejects.toMatchObject({ code: "55P03" })
     expect(ctrl.verbs).toContain("rollback")
   })
+
+  it("a pool that cannot hand out a connection in time is reported as busy", async () => {
+    const pool = { query: async () => ({ rows: [], rowCount: 0 }), connect: () => Promise.reject(new Error("timeout exceeded when trying to connect")) } as unknown as PgPool
+    expect(await new PgInboxStore(pool, BOUNDS).enqueue(ENQ)).toEqual({ ok: false, reason: "busy" })
+  })
+
+  it("any other connect failure propagates", async () => {
+    const pool = { query: async () => ({ rows: [], rowCount: 0 }), connect: () => Promise.reject(new Error("ECONNREFUSED")) } as unknown as PgPool
+    await expect(new PgInboxStore(pool, BOUNDS).enqueue(ENQ)).rejects.toThrow("ECONNREFUSED")
+  })
 })

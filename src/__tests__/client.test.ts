@@ -30,6 +30,7 @@ function config(overrides: Partial<RelayConfig> = {}): RelayConfig {
     sendRateLimit: { capacity: 100, refillPerSec: 1 },
     maxBodyBytes: 1024 * 1024,
     maxConnections: 1024,
+    pgPoolMax: 10,
     ...overrides,
   }
 }

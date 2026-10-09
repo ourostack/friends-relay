@@ -52,6 +52,8 @@ export interface RelayConfig {
   maxBodyBytes: number
   /** Most simultaneous connections the HTTP server accepts (`RELAY_MAX_CONNECTIONS`). */
   maxConnections: number
+  /** Postgres connection pool size (`RELAY_PG_POOL_MAX`). */
+  pgPoolMax: number
   /** Storage backend selector (env `RELAY_STORE`). Defaults to `memory`. */
   store: StoreBackend
   /** Postgres connection string (env `DATABASE_URL`). Present + required only when
@@ -109,6 +111,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     },
     maxBodyBytes: intEnv(env, "RELAY_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES),
     maxConnections: intEnv(env, "RELAY_MAX_CONNECTIONS", 1024),
+    pgPoolMax: intEnv(env, "RELAY_PG_POOL_MAX", 10),
     store,
     databaseUrl,
   }

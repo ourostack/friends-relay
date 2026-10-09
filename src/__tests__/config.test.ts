@@ -29,6 +29,8 @@ describe("loadConfig — 12-factor, infra-agnostic", () => {
     const c = loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_MAX_BODY_BYTES: "8388608", RELAY_MAX_CONNECTIONS: "50" })
     expect(c.maxBodyBytes).toBe(8388608)
     expect(c.maxConnections).toBe(50)
+    expect(d.pgPoolMax).toBe(10)
+    expect(loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_PG_POOL_MAX: "4" }).pgPoolMax).toBe(4)
     expect(() => loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_MAX_BODY_BYTES: "0" })).toThrow(/must be a positive integer/)
   })
 

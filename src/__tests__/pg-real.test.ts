@@ -11,6 +11,8 @@ import { MemoryLogger } from "../logger"
 import { SequenceTokenSource } from "../security/tokens"
 import { assemblePostgresStores, assembleRelay } from "../server/bootstrap"
 import { ADVISORY_LOCK_CLASS_ID, PgInboxStore } from "../store/postgres/inbox"
+import { PgCredentialStore } from "../store/postgres/credentials"
+import { PgHandleLifecycleStore } from "../store/postgres/lifecycle"
 import { PgRegistryStore } from "../store/postgres/registry"
 import { createRealPg, REAL_PG_ENV } from "./pg-harness"
 import type { RealPgHandle } from "./pg-harness"
@@ -190,6 +192,62 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
       const results = await Promise.all(sends)
       expect(results.every((r) => r.ok || r.reason === "unknown_handle")).toBe(true)
       expect(await inbox.depth("h", 0)).toBe(0)
+    })
+
+    it("a send checked against owner A cannot land in new owner B's inbox (same handle, different DID)", async () => {
+      const reg = new PgRegistryStore(pg.newPool())
+      await reg.put({ handle: "h", did: "did:key:zA", agentCard: card("did:key:zA"), registeredAt: 1 })
+      const inbox = new PgInboxStore(pg.newPool(), BOUNDS, { requireRegistration: true })
+      const holder = await pg.newPool().connect()
+      await holder.query("begin")
+      await holder.query(`select pg_advisory_xact_lock(${ADVISORY_LOCK_CLASS_ID}, hashtext($1))`, ["h"])
+      // The relay checked registration A, then the send blocks on the handle lock...
+      const send = inbox.enqueue({ handle: "h", message: msg(), enqueuedAt: 0, expiresAt: TTL, sizeBytes: 10, registration: { did: "did:key:zA", registeredAt: 1 } })
+      await new Promise((r) => setTimeout(r, 300))
+      // ...A deregisters and B registers the same handle with a different DID.
+      await reg.remove("h")
+      await reg.put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 2 })
+      await holder.query("commit")
+      holder.release()
+      expect(await send).toEqual({ ok: false, reason: "unknown_handle" })
+      expect(await inbox.depth("h", 0)).toBe(0)
+    })
+
+    it("lifecycle: failing purge leaves everything intact and retryable; B's mail is never lost", async () => {
+      const real = pg.newPool()
+      let fail = false
+      const flaky: typeof real = {
+        query: (t, p) => real.query(t, p),
+        async connect() {
+          const c = await real.connect()
+          return {
+            release: () => c.release(),
+            query: async (t: string, p?: unknown[]) => {
+              if (fail && /^delete from inbox where handle = \$1$/.test(t)) {
+                fail = false
+                throw new Error("injected failure")
+              }
+              return c.query(t, p)
+            },
+          }
+        },
+      }
+      const life = new PgHandleLifecycleStore(flaky)
+      const inbox = new PgInboxStore(pg.newPool(), BOUNDS, { requireRegistration: true })
+      const creds = new PgCredentialStore(pg.newPool())
+      expect(await life.register({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 1 })).toBe(true)
+      await creds.setCurrent("h", { inboxAuth: "ia", sendCredential: "sc" })
+      await enq(inbox, "h", { ct: "a-mail" })
+      fail = true
+      await expect(life.deregister("h")).rejects.toThrow("injected failure")
+      expect(await creds.handleForInboxAuth("ia")).toBe("h")
+      expect(await inbox.depth("h", 0)).toBe(1)
+      expect(await life.deregister("h")).toBe(true)
+      expect(await inbox.depth("h", 0)).toBe(0)
+      // B registers right after, receives mail; nothing of A's remains and B's survives.
+      await life.register({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 2 })
+      expect((await enq(inbox, "h", { ct: "b-mail" })).ok).toBe(true)
+      expect((await inbox.list("h", 0)).map((m) => m.message.parts[0].data.sealed.ct)).toEqual(["b-mail"])
     })
 
     it("queued messages and FIFO order survive a restart (fresh pool, same schema)", async () => {

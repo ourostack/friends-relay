@@ -30,6 +30,11 @@ export interface InboxStore {
     enqueuedAt: number
     expiresAt: number
     sizeBytes: number
+    /** The registration (DID + registeredAt) the relay checked for this send. When
+     * present, the store re-checks it is STILL the handle's current registration
+     * atomically with the insert and refuses with `unknown_handle` otherwise, so a
+     * send in flight across a deregister + re-register cannot reach the new owner. */
+    registration?: { did: string; registeredAt: number }
   }): Promise<EnqueueResult>
 
   /** List the (non-expired) queued messages for `handle` — the NAT-traversal read
@@ -116,4 +121,15 @@ export interface CredentialStore {
 
   /** Resolve a send credential to the handle it may post to, or null. */
   handleForSendCredential(sendCredential: string): Promise<string | null>
+}
+
+/** Atomic register / deregister of a handle across the registry, credentials and inbox.
+ * `deregister` removes the registration, the credentials and the queued mail together
+ * (all or nothing). `register` upserts the registration and, when the handle is NEW,
+ * clears any leftover mail. */
+export interface HandleLifecycleStore {
+  /** Returns whether the registration was newly created (false = replaced). */
+  register(reg: Registration): Promise<boolean>
+  /** Returns whether a registration existed. */
+  deregister(handle: string): Promise<boolean>
 }

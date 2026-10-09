@@ -33,6 +33,7 @@ function baseConfig(overrides: Partial<RelayConfig> = {}): RelayConfig {
     sendRateLimit: { capacity: 100, refillPerSec: 1 },
     maxBodyBytes: 1024 * 1024,
     maxConnections: 1024,
+    pgPoolMax: 10,
     ...overrides,
   }
 }
@@ -867,5 +868,113 @@ describe("body caps by route, readBody on a dead request, busy, request timeout 
     const s = createServer(config, relay, undefined, { requestTimeoutMs: 0 })
     expect(s.requestTimeout).toBe(30_000)
     expect(s.headersTimeout).toBeGreaterThan(0)
+  })
+})
+
+describe("pool starvation, early rate limit, timeout cadence, bad percent-encoding", () => {
+  async function listen(server: Server): Promise<string> {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const addr = server.address()
+    if (!addr || typeof addr === "string") throw new Error("no address")
+    return `http://127.0.0.1:${addr.port}`
+  }
+  const close = (server: Server) => new Promise<void>((resolve) => server.close(() => resolve()))
+  function rawStatus(base: string, method: string, path: string, headers: Record<string, string> = {}, partial?: string): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no answer")), 3000)
+      const r = httpRequest(`${base}${path}`, { method, headers }, (res) => {
+        let body = ""
+        res.on("data", (c: Buffer) => (body += c.toString()))
+        res.on("end", () => {
+          clearTimeout(timer)
+          resolve({ status: res.statusCode as number, body })
+        })
+      })
+      r.on("error", () => undefined)
+      if (partial !== undefined) r.write(partial)
+      else r.end()
+    })
+  }
+
+  it("a pool-acquire timeout during a request answers 503 busy (not 500) and logs a warning only", async () => {
+    const { config } = makeRelay()
+    const logger = new MemoryLogger()
+    const starved = { ownsInbox: () => Promise.reject(new Error("timeout exceeded when trying to connect")) } as unknown as Relay
+    const server = createServer(config, starved, logger, { drainGraceMs: 50 })
+    const base = await listen(server)
+    try {
+      const res = await rawStatus(base, "DELETE", "/register/h", { authorization: "Bearer x" })
+      expect(res.status).toBe(503)
+      expect(JSON.parse(res.body)).toEqual({ error: "busy" })
+      expect(logger.entries.filter((e) => e.level === "error")).toEqual([])
+    } finally {
+      await close(server)
+    }
+  })
+
+  it("the send rate limit runs BEFORE the body is read", async () => {
+    const { relay, config } = makeRelay(baseConfig({ sendRateLimit: { capacity: 1, refillPerSec: 1 } }))
+    const server = createServer(config, relay, undefined, { drainGraceMs: 50 })
+    const base = await listen(server)
+    try {
+      const reg = await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: await relay.issueInvite() })
+      if (!reg.ok) throw new Error("setup")
+      const auth = { authorization: `Bearer ${reg.grant.sendCredential}`, "content-length": "100" }
+      // first send consumes the only token (body never finishes: the server proceeds to read it)
+      void rawStatus(base, "POST", "/a2a/h", auth, "{").catch(() => undefined)
+      await new Promise((r) => setTimeout(r, 100))
+      const second = await rawStatus(base, "POST", "/a2a/h", auth, "{")
+      expect(second.status).toBe(429)
+    } finally {
+      server.closeAllConnections()
+      await close(server)
+    }
+  })
+
+  it("a successful send is charged ONE rate-limit token, not two", async () => {
+    const { relay, config } = makeRelay(baseConfig({ sendRateLimit: { capacity: 2, refillPerSec: 1 } }))
+    const server = createServer(config, relay, undefined, { drainGraceMs: 50 })
+    const base = await listen(server)
+    try {
+      const reg = await relay.register({ handle: "h", did: "did:key:zRecipient", agentCard: CARD, inviteToken: await relay.issueInvite() })
+      if (!reg.ok) throw new Error("setup")
+      const send = (id: string) => fetch(`${base}/a2a/h`, { method: "POST", headers: { authorization: `Bearer ${reg.grant.sendCredential}` }, body: JSON.stringify(opaque(undefined, "c", id)) })
+      expect((await send("m1")).status).toBe(202)
+      expect((await send("m2")).status).toBe(202)
+      expect((await send("m3")).status).toBe(429)
+    } finally {
+      await close(server)
+    }
+  })
+
+  it("a slow upload is cut off promptly: the timeout check runs at half the request timeout", async () => {
+    const { relay, config } = makeRelay()
+    const server = createServer(config, relay, undefined, { requestTimeoutMs: 600, drainGraceMs: 50 })
+    const base = await listen(server)
+    try {
+      const started = Date.now()
+      const res = await rawStatus(base, "POST", "/register", { "content-length": "100" }, "{")
+      expect(res.status).toBe(408)
+      expect(Date.now() - started).toBeLessThan(2000)
+    } finally {
+      await close(server)
+    }
+  })
+
+  it("a malformed percent-encoding is a 400 bad_request, not a 500 or an error log", async () => {
+    const { relay, config, logger } = makeRelay()
+    const server = createServer(config, relay, undefined, { drainGraceMs: 50 })
+    const base = await listen(server)
+    try {
+      for (const [m, p] of [["POST", "/a2a/%E0"], ["DELETE", "/register/%E0"], ["GET", "/inbox/%E0"], ["GET", "/directory/by-did/%E0"]]) {
+        const res = await rawStatus(base, m, p, { authorization: "Bearer x" })
+        expect(res.status).toBe(400)
+        expect(JSON.parse(res.body)).toEqual({ error: "bad_request" })
+      }
+      expect(logger.entries.filter((e) => e.level === "error")).toEqual([])
+      expect(await handle(config, relay, { method: "GET", path: "/inbox/%E0", headers: {}, bearer: "x" })).toEqual({ status: 400, body: { error: "bad_request" } })
+    } finally {
+      await close(server)
+    }
   })
 })

@@ -104,3 +104,9 @@ export async function migrate(pool: PgPool): Promise<void> {
     await pool.query(stmt)
   }
 }
+
+/** Whether a thrown value is `pg-pool`'s "no connection became available within
+ * `connectionTimeoutMillis`" error (the pool is starved). Callers report it as busy. */
+export function isPoolTimeout(err: unknown): boolean {
+  return err instanceof Error && err.message === "timeout exceeded when trying to connect"
+}
