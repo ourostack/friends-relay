@@ -67,7 +67,13 @@ export class PgInboxStore implements InboxStore {
   constructor(
     private readonly pool: PgPool,
     private readonly bounds: InboxBounds,
-    private readonly options: { lockTimeoutMs?: number } = {},
+    private readonly options: {
+      lockTimeoutMs?: number
+      /** Refuse (unknown_handle) an enqueue whose handle has no registration row,
+       * checked INSIDE the locked transaction so it cannot race a deregistration.
+       * Production wiring turns this on; bare store tests leave it off. */
+      requireRegistration?: boolean
+    } = {},
   ) {}
 
   async enqueue(input: {
@@ -117,9 +123,14 @@ export class PgInboxStore implements InboxStore {
     input: { handle: string; message: A2AMessage; enqueuedAt: number; expiresAt: number; sizeBytes: number },
   ): Promise<EnqueueResult> {
     await client.query(`begin`)
-    // Bound the wait for the lock (an integer literal: SET LOCAL takes no parameters).
-    await client.query(`set local lock_timeout = ${Math.trunc(this.options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS)}`)
-    await client.query(`select pg_advisory_xact_lock(${ADVISORY_LOCK_CLASS_ID}, hashtext($1))`, [input.handle])
+    await this.lockHandle(client, input.handle)
+    if (this.options.requireRegistration) {
+      const reg = await client.query(`select 1 from registrations where handle = $1`, [input.handle])
+      if (reg.rows.length === 0) {
+        await client.query(`commit`)
+        return { ok: false, reason: "unknown_handle" }
+      }
+    }
     await client.query(`delete from inbox where handle = $1 and expires_at <= $2`, [input.handle, input.enqueuedAt])
     const agg = await client.query(
       `select count(*)::int as n, coalesce(sum(size_bytes), 0)::int as bytes
@@ -173,9 +184,29 @@ export class PgInboxStore implements InboxStore {
     return res.rows.length
   }
 
+  /** Take the per-handle advisory lock for the rest of the current transaction,
+   * waiting at most the lock timeout. Enqueue and purge share it, so a purge cannot
+   * interleave with an in-flight enqueue to the same handle. */
+  private async lockHandle(client: PgPoolClient, handle: string): Promise<void> {
+    // An integer literal: SET LOCAL takes no parameters.
+    await client.query(`set local lock_timeout = ${Math.trunc(this.options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS)}`)
+    await client.query(`select pg_advisory_xact_lock(${ADVISORY_LOCK_CLASS_ID}, hashtext($1))`, [handle])
+  }
+
   async purge(handle: string): Promise<number> {
-    const res = await this.pool.query(`delete from inbox where handle = $1 returning queue_id`, [handle])
-    return res.rows.length
+    const client = await this.pool.connect()
+    try {
+      await client.query(`begin`)
+      await this.lockHandle(client, handle)
+      const res = await client.query(`delete from inbox where handle = $1 returning queue_id`, [handle])
+      await client.query(`commit`)
+      return res.rows.length
+    } catch (err) {
+      await rollbackQuietly(client)
+      throw err
+    } finally {
+      client.release()
+    }
   }
 
   async depth(handle: string, now: number): Promise<number> {

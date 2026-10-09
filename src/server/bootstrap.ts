@@ -94,7 +94,7 @@ export function defaultPoolFactory(databaseUrl: string, logger: Logger = silentL
  * (config.inboxBounds), exactly like the in-memory inbox. */
 export function buildPostgresStores(pool: PgPool, bounds: InboxBounds): PostgresStores {
   return {
-    inbox: new PgInboxStore(pool, bounds),
+    inbox: new PgInboxStore(pool, bounds, { requireRegistration: true }),
     registry: new PgRegistryStore(pool),
     invites: new PgInviteStore(pool),
     credentials: new PgCredentialStore(pool),

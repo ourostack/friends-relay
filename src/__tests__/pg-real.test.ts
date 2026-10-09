@@ -29,6 +29,9 @@ function msg(ct = "ct", id = "m1"): A2AMessage {
 }
 const card = (did: string): PublicAgentCard => ({ name: "a", url: "u", version: "1", protocolVersion: "0.3.0", did })
 
+// The concurrency tests queue dozens of sends behind one lock; on a loaded CI runner
+// that can exceed the 5 s production default, so they allow far longer.
+const SLOW_RUNNER_LOCK_TIMEOUT_MS = 30_000
 const TTL = 1000
 const BOUNDS = { maxMessages: 10, maxBytes: 1_000_000 }
 const enq = (inbox: PgInboxStore, handle: string, o: { at?: number; exp?: number; size?: number; ct?: string } = {}) =>
@@ -98,7 +101,7 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
     it("concurrent enqueues to one handle never overshoot the count quota", async () => {
       const reg = new PgRegistryStore(pg.newPool())
       await reg.put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 0 })
-      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 3, maxBytes: 1_000_000 })
+      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 3, maxBytes: 1_000_000 }, { lockTimeoutMs: SLOW_RUNNER_LOCK_TIMEOUT_MS })
       const results = await Promise.all(Array.from({ length: 8 }, (_, i) => enq(inbox, "h", { ct: `c${i}` })))
       expect(results.filter((r) => r.ok)).toHaveLength(3)
       expect(await inbox.depth("h", 0)).toBe(3)
@@ -107,7 +110,7 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
     it("30 concurrent sends to an inbox with free space ALL succeed (no 40001 leaking out)", async () => {
       const reg = new PgRegistryStore(pg.newPool())
       await reg.put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 0 })
-      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 1000, maxBytes: 1_000_000 })
+      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 1000, maxBytes: 1_000_000 }, { lockTimeoutMs: SLOW_RUNNER_LOCK_TIMEOUT_MS })
       const results = await Promise.all(Array.from({ length: 30 }, (_, i) => enq(inbox, "h", { ct: `c${i}` })))
       expect(results.filter((r) => !r.ok)).toEqual([])
       expect(await inbox.depth("h", 0)).toBe(30)
@@ -120,7 +123,7 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
       if (registered) {
         await new PgRegistryStore(pg.newPool()).put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 0 })
       }
-      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 5, maxBytes: 1_000_000 })
+      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 5, maxBytes: 1_000_000 }, { lockTimeoutMs: SLOW_RUNNER_LOCK_TIMEOUT_MS })
       const results = await Promise.all(Array.from({ length: 30 }, (_, i) => enq(inbox, "h", { ct: `c${i}` })))
       expect(results.filter((r) => r.ok)).toHaveLength(5)
       expect(results.filter((r) => !r.ok).every((r) => !r.ok && r.reason === "quota_count")).toBe(true)
@@ -153,6 +156,40 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
         holder.release()
       }
       expect((await enq(inbox, "h")).ok).toBe(true)
+    })
+
+    it("a send already waiting on the handle lock when it is deregistered is refused, leaving no rows", async () => {
+      const reg = new PgRegistryStore(pg.newPool())
+      await reg.put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 0 })
+      const inbox = new PgInboxStore(pg.newPool(), BOUNDS, { requireRegistration: true })
+      const holder = await pg.newPool().connect()
+      await holder.query("begin")
+      await holder.query(`select pg_advisory_xact_lock(${ADVISORY_LOCK_CLASS_ID}, hashtext($1))`, ["h"])
+      // The send passed the relay's registry check and is now blocked on the lock...
+      const send = enq(inbox, "h")
+      await new Promise((r) => setTimeout(r, 300))
+      // ...while the owner deregisters (registry first, then purge, as Relay.deregister does).
+      await reg.remove("h")
+      const purge = inbox.purge("h")
+      await new Promise((r) => setTimeout(r, 100))
+      await holder.query("commit")
+      holder.release()
+      expect(await send).toEqual({ ok: false, reason: "unknown_handle" })
+      await purge
+      expect(await inbox.depth("h", 0)).toBe(0)
+    })
+
+    it("concurrent sends racing a deregister leave zero rows afterwards", async () => {
+      const reg = new PgRegistryStore(pg.newPool())
+      await reg.put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 0 })
+      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 1000, maxBytes: 1_000_000 }, { requireRegistration: true, lockTimeoutMs: SLOW_RUNNER_LOCK_TIMEOUT_MS })
+      const sends = Array.from({ length: 20 }, (_, i) => enq(inbox, "h", { ct: `c${i}` }))
+      await new Promise((r) => setTimeout(r, 5))
+      await reg.remove("h")
+      await inbox.purge("h")
+      const results = await Promise.all(sends)
+      expect(results.every((r) => r.ok || r.reason === "unknown_handle")).toBe(true)
+      expect(await inbox.depth("h", 0)).toBe(0)
     })
 
     it("queued messages and FIFO order survive a restart (fresh pool, same schema)", async () => {

@@ -163,10 +163,12 @@ export class Relay {
    * credentials, purges its queued messages and removes the registration. Returns whether it existed. */
   async deregister(handle: string): Promise<boolean> {
     await this.credentials.revoke(handle)
+    // Remove the registration FIRST, then purge: a send still in flight is refused (or
+    // swept by the purge) because the store re-checks registration under the handle lock.
+    const existed = await this.deps.registry.remove(handle)
     // Drop the previous owner's queued mail: the next registrant of this handle must
     // not inherit it.
     await this.deps.inbox.purge(handle)
-    const existed = await this.deps.registry.remove(handle)
     if (existed) {
       this.deps.logger.log("info", "deregistered", { handle, decision: "deregistered" })
     }

@@ -171,4 +171,10 @@ describe("RF4 — PgInboxStore atomic enqueue: serialization-failure retry seman
     await expect(new PgInboxStore(ctrl.pool, BOUNDS).enqueue(ENQ)).rejects.toBe(thrown)
     expect(ctrl.attempts).toBe(1)
   })
+
+  it("purge rolls back and rethrows when its lock wait fails", async () => {
+    const ctrl = makeFakePool({ lockFailsWith: "55P03" })
+    await expect(new PgInboxStore(ctrl.pool, BOUNDS).purge("h")).rejects.toMatchObject({ code: "55P03" })
+    expect(ctrl.verbs).toContain("rollback")
+  })
 })
