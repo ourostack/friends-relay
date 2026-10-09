@@ -4,6 +4,9 @@
 //
 // NOT a *.test.ts file (no tests) — a helper imported by the suites. It is excluded
 // from coverage like the rest of src/__tests__/**.
+import { randomBytes } from "node:crypto"
+
+import { Pool } from "pg"
 import { newDb } from "pg-mem"
 import type { IMemoryDb } from "pg-mem"
 
@@ -47,4 +50,45 @@ export async function migratedPgMem(): Promise<{ pool: PgPool; handle: PgMemHand
   const pool = handle.newPool()
   await migrate(pool)
   return { pool, handle }
+}
+
+/** The env var that opts a run into the real-Postgres suite. Unset ⇒ the suite is
+ * skipped (pg-mem is not real Postgres: it accepts SQL the real server rejects). */
+export const REAL_PG_ENV = "RELAY_TEST_DATABASE_URL"
+
+/** A real-Postgres handle isolated in its own throwaway schema. */
+export interface RealPgHandle {
+  /** The schema this handle's pools are pinned to via `search_path`. */
+  schema: string
+  /** Build a fresh pool pinned to the isolated schema (a new pool over the same
+   * schema models a process restart). Pools are tracked and closed by `cleanup`. */
+  newPool(): PgPool
+  /** Close every pool and drop the schema. */
+  cleanup(): Promise<void>
+}
+
+/** Create an isolated schema on the real database named by RELAY_TEST_DATABASE_URL,
+ * run the production migration in it, and return the handle. Each caller gets its own
+ * schema, so suites never see each other's rows. */
+export async function createRealPg(databaseUrl: string): Promise<RealPgHandle> {
+  const schema = `relay_test_${randomBytes(6).toString("hex")}`
+  const admin = new Pool({ connectionString: databaseUrl, max: 1 })
+  await admin.query(`create schema ${schema}`)
+  const pools: Pool[] = []
+  const handle: RealPgHandle = {
+    schema,
+    newPool(): PgPool {
+      const pool = new Pool({ connectionString: databaseUrl, options: `-c search_path=${schema}` })
+      pools.push(pool)
+      return pool as unknown as PgPool
+    },
+    async cleanup(): Promise<void> {
+      await Promise.all(pools.map((p) => p.end()))
+      await admin.query(`drop schema if exists ${schema} cascade`)
+      await admin.end()
+    },
+  }
+  const pool = handle.newPool()
+  await migrate(pool)
+  return handle
 }
