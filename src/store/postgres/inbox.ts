@@ -80,8 +80,8 @@ export class PgInboxStore implements InboxStore {
   }
 
   /** One attempt of the atomic enqueue on a checked-out client. BEGIN SERIALIZABLE →
-   * prune expired (drop-on-enqueue) → read live count+bytes (FOR UPDATE so the real
-   * backend serializes concurrent posts to this handle) → enforce both bounds
+   * prune expired (drop-on-enqueue) → lock the recipient's registry row (so concurrent
+   * posts to this handle queue up) → read live count+bytes → enforce both bounds
    * (count-first, exact reasons — mirrors MemoryInboxStore) → conditional INSERT →
    * COMMIT. A quota rejection still COMMITs (the prune is a legitimate, committable
    * side effect); only an error rolls back (handled by the caller). */
@@ -90,10 +90,15 @@ export class PgInboxStore implements InboxStore {
     input: { handle: string; message: A2AMessage; enqueuedAt: number; expiresAt: number; sizeBytes: number },
   ): Promise<EnqueueResult> {
     await client.query(`begin isolation level serializable`)
+    // Serialize concurrent posts to this recipient by locking its single registry row.
+    // (`FOR UPDATE` is not allowed on an aggregate query, and an empty inbox has no
+    // inbox rows to lock.) A handle with no registry row locks nothing and relies on
+    // SERIALIZABLE alone; the relay only enqueues to registered handles.
+    await client.query(`select handle from registrations where handle = $1 for update`, [input.handle])
     await client.query(`delete from inbox where handle = $1 and expires_at <= $2`, [input.handle, input.enqueuedAt])
     const agg = await client.query(
       `select count(*)::int as n, coalesce(sum(size_bytes), 0)::int as bytes
-       from inbox where handle = $1 and expires_at > $2 for update`,
+       from inbox where handle = $1 and expires_at > $2`,
       [input.handle, input.enqueuedAt],
     )
     const { n, bytes } = agg.rows[0] as { n: number; bytes: number }
