@@ -69,6 +69,8 @@ jobs:
       - name: Run real-Postgres suite
         env:
           RELAY_TEST_DATABASE_URL: postgresql://relay:relay@localhost:5432/relay_test
+          # Fail (not skip) if the database variable above is ever renamed or dropped.
+          RELAY_REQUIRE_REAL_PG: "1"
         run: npm run test:real-pg
 
   docker-build:

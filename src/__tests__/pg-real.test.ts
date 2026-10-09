@@ -17,6 +17,12 @@ import type { RealPgHandle } from "./pg-harness"
 import type { A2AMessage, PublicAgentCard } from "../types"
 
 const DATABASE_URL = process.env[REAL_PG_ENV]
+// The dedicated CI job sets RELAY_REQUIRE_REAL_PG: there the suite must RUN, so a
+// renamed or dropped database variable fails loudly instead of skipping. (Keyed on its
+// own flag, not bare CI, because the pg-mem coverage job also runs in CI without a DB.)
+if (process.env.RELAY_REQUIRE_REAL_PG && !DATABASE_URL) {
+  throw new Error(`${REAL_PG_ENV} must be set when RELAY_REQUIRE_REAL_PG is set (the real-Postgres suite cannot be skipped silently)`)
+}
 
 function msg(ct = "ct", id = "m1"): A2AMessage {
   return { messageId: id, role: "agent", parts: [{ kind: "data", data: { v: 1, sealed: { v: 1, ePk: "e", n: "n", ct }, recipientDid: "did:key:zB" } }] }
@@ -96,6 +102,29 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
       const results = await Promise.all(Array.from({ length: 8 }, (_, i) => enq(inbox, "h", { ct: `c${i}` })))
       expect(results.filter((r) => r.ok)).toHaveLength(3)
       expect(await inbox.depth("h", 0)).toBe(3)
+    })
+
+    it("30 concurrent sends to an inbox with free space ALL succeed (no 40001 leaking out)", async () => {
+      const reg = new PgRegistryStore(pg.newPool())
+      await reg.put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 0 })
+      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 1000, maxBytes: 1_000_000 })
+      const results = await Promise.all(Array.from({ length: 30 }, (_, i) => enq(inbox, "h", { ct: `c${i}` })))
+      expect(results.filter((r) => !r.ok)).toEqual([])
+      expect(await inbox.depth("h", 0)).toBe(30)
+    })
+
+    it.each([
+      ["with a registry row", true],
+      ["without a registry row", false],
+    ])("exact count quota under 30 concurrent sends %s", async (_label, registered) => {
+      if (registered) {
+        await new PgRegistryStore(pg.newPool()).put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 0 })
+      }
+      const inbox = new PgInboxStore(pg.newPool(), { maxMessages: 5, maxBytes: 1_000_000 })
+      const results = await Promise.all(Array.from({ length: 30 }, (_, i) => enq(inbox, "h", { ct: `c${i}` })))
+      expect(results.filter((r) => r.ok)).toHaveLength(5)
+      expect(results.filter((r) => !r.ok).every((r) => !r.ok && r.reason === "quota_count")).toBe(true)
+      expect(await inbox.depth("h", 0)).toBe(5)
     })
 
     it("queued messages and FIFO order survive a restart (fresh pool, same schema)", async () => {

@@ -88,7 +88,11 @@ export async function createRealPg(databaseUrl: string): Promise<RealPgHandle> {
       await admin.end()
     },
   }
-  const pool = handle.newPool()
-  await migrate(pool)
+  try {
+    await migrate(handle.newPool())
+  } catch (err) {
+    await handle.cleanup()
+    throw err
+  }
   return handle
 }
