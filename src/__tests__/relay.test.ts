@@ -5,7 +5,7 @@ import type { RelayConfig } from "../config"
 import { MemoryLogger } from "../logger"
 import { Relay } from "../relay"
 import { SequenceTokenSource } from "../security/tokens"
-import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore, SequentialHandleLifecycle } from "../store/memory"
 import type { A2AMessage, PublicAgentCard } from "../types"
 
 const CARD: PublicAgentCard = { name: "a", url: "https://a", version: "1", protocolVersion: "0.3.0", did: "did:key:zRecipient" }
@@ -24,6 +24,9 @@ function baseConfig(overrides: Partial<RelayConfig> = {}): RelayConfig {
     inboxBounds: { maxMessages: 3, maxBytes: 1_000_000 },
     messageTtlMs: 1000,
     sendRateLimit: { capacity: 5, refillPerSec: 1 },
+    maxBodyBytes: 1024 * 1024,
+    maxConnections: 1024,
+    pgPoolMax: 10,
     ...overrides,
   }
 }
@@ -32,12 +35,16 @@ function makeRelay(config = baseConfig()) {
   const clock = new ManualClock(0)
   const logger = new MemoryLogger()
   const tokens = new SequenceTokenSource("t")
+  const registry = new MemoryRegistryStore()
+  const credentials = new MemoryCredentialStore()
+  const inbox = new MemoryInboxStore(config.inboxBounds, registry)
   const relay = new Relay({
     config,
-    inbox: new MemoryInboxStore(config.inboxBounds),
-    registry: new MemoryRegistryStore(),
+    inbox,
+    registry,
     invites: new MemoryInviteStore(),
-    credentials: new MemoryCredentialStore(),
+    credentials,
+    lifecycle: new SequentialHandleLifecycle(registry, credentials, inbox),
     tokens,
     clock,
     logger,

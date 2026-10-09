@@ -124,3 +124,22 @@ describe("assemblePostgresStores", () => {
     await (pool as unknown as { end(): Promise<void> }).end()
   })
 })
+
+describe("pool sizing and starvation", () => {
+  it("defaultPoolFactory bounds the pool and the connection wait", async () => {
+    const dflt = defaultPoolFactory("postgres://user:pass@localhost:5432/db") as unknown as { options: { max: number; connectionTimeoutMillis: number }; end(): Promise<void> }
+    expect(dflt.options.max).toBe(10)
+    expect(dflt.options.connectionTimeoutMillis).toBe(5000)
+    await dflt.end()
+    const custom = defaultPoolFactory("postgres://user:pass@localhost:5432/db", undefined, { max: 3 }) as unknown as { options: { max: number }; end(): Promise<void> }
+    expect(custom.options.max).toBe(3)
+    await custom.end()
+  })
+
+  it("assemblePostgresStores hands the pool size to the factory", async () => {
+    const handle = makePgMem()
+    let seen: unknown
+    await assemblePostgresStores("postgres://ignored", BOUNDS, (_u, _l, o) => ((seen = o), handle.newPool()), undefined, { poolMax: 4 })
+    expect(seen).toEqual({ max: 4 })
+  })
+})

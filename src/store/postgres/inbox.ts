@@ -12,21 +12,39 @@ import { randomUUID } from "node:crypto"
 
 import type { InboxBounds } from "../memory"
 import type { EnqueueResult, InboxStore } from "../interfaces"
+import { ADVISORY_LOCK_CLASS_ID, lockHandle } from "./handle-lock"
+import { isPoolTimeout } from "./schema"
 import type { PgPool, PgPoolClient } from "./schema"
+
+export { ADVISORY_LOCK_CLASS_ID }
 import type { A2AMessage, QueuedMessage } from "../../types"
 
-/** PostgreSQL's `serialization_failure` SQLSTATE — raised under SERIALIZABLE when a
- * concurrent transaction makes this one's reads/writes non-serializable. The correct
- * response is to roll back and RETRY (the conflict is transient). */
+/** PostgreSQL's `serialization_failure` SQLSTATE — a transient conflict between
+ * concurrent transactions. The correct response is to roll back and RETRY. (The
+ * advisory lock normally prevents it; this is a fallback.) */
 const SERIALIZATION_FAILURE = "40001"
 
-/** Max attempts for the SERIALIZABLE enqueue before giving up. A handful is plenty —
+/** PostgreSQL's `deadlock_detected` SQLSTATE — also transient; retried like 40001. */
+const DEADLOCK_DETECTED = "40P01"
+
+/** PostgreSQL's `lock_not_available` SQLSTATE — raised when `lock_timeout` expires
+ * while waiting for the per-handle lock. Reported to the caller as "busy" (HTTP 503). */
+const LOCK_NOT_AVAILABLE = "55P03"
+
+/** Max attempts for the enqueue before giving up. A handful is plenty —
  * a contended handle resolves in 1–2 retries; this just bounds a pathological loop. */
 const MAX_ENQUEUE_ATTEMPTS = 5
 
-/** Whether an unknown thrown value is a Postgres serialization failure (so we retry). */
-function isSerializationFailure(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === SERIALIZATION_FAILURE
+/** The SQLSTATE of an unknown thrown value, if it carries one. */
+function sqlState(err: unknown): unknown {
+  return typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined
+}
+
+/** Whether a thrown value is a transient Postgres conflict (serialization failure or
+ * deadlock), so the whole transaction should be retried. */
+function isRetryable(err: unknown): boolean {
+  const code = sqlState(err)
+  return code === SERIALIZATION_FAILURE || code === DEADLOCK_DETECTED
 }
 
 /** A row shape as read back from the `inbox` table. `message` is the opaque jsonb
@@ -46,6 +64,13 @@ export class PgInboxStore implements InboxStore {
   constructor(
     private readonly pool: PgPool,
     private readonly bounds: InboxBounds,
+    private readonly options: {
+      lockTimeoutMs?: number
+      /** Refuse (unknown_handle) an enqueue whose handle has no registration row,
+       * checked INSIDE the locked transaction so it cannot race a deregistration.
+       * Production wiring turns this on; bare store tests leave it off. */
+      requireRegistration?: boolean
+    } = {},
   ) {}
 
   async enqueue(input: {
@@ -54,22 +79,32 @@ export class PgInboxStore implements InboxStore {
     enqueuedAt: number
     expiresAt: number
     sizeBytes: number
+    registration?: { did: string; registeredAt: number }
   }): Promise<EnqueueResult> {
     // The bound-enforcing enqueue MUST be atomic: prune → count/sum → insert as three
     // separate autocommit statements let two concurrent posts to one handle both read
     // the same under-cap count/byte-sum and both insert, overshooting the quota. So the
-    // whole sequence runs in ONE SERIALIZABLE transaction — Postgres aborts a
-    // non-serializable interleaving with `40001`, which we roll back and RETRY. (Bare
-    // `FOR UPDATE` is insufficient: an empty handle has no rows to lock, so the cap
-    // race on a fresh handle is a phantom that only SERIALIZABLE detects.)
+    // whole sequence runs in ONE transaction whose FIRST statement takes a per-handle
+    // advisory lock (see enqueueTxn): concurrent posts to one handle queue up behind it
+    // and each sees the previous one's committed rows. The retry loop below is only a
+    // fallback for a transient serialization failure (40001) or deadlock (40P01).
     for (let attempt = 1; ; attempt++) {
-      const client = await this.pool.connect()
+      let client: PgPoolClient
+      try {
+        client = await this.pool.connect()
+      } catch (err) {
+        if (isPoolTimeout(err)) return { ok: false, reason: "busy" } // pool starved
+        throw err
+      }
       try {
         const result = await this.enqueueTxn(client, input)
         return result
       } catch (err) {
         await rollbackQuietly(client)
-        if (isSerializationFailure(err) && attempt < MAX_ENQUEUE_ATTEMPTS) {
+        if (sqlState(err) === LOCK_NOT_AVAILABLE) {
+          return { ok: false, reason: "busy" } // the handle's lock was held too long
+        }
+        if (isRetryable(err) && attempt < MAX_ENQUEUE_ATTEMPTS) {
           continue // transient conflict — retry the whole transaction
         }
         throw err
@@ -79,21 +114,29 @@ export class PgInboxStore implements InboxStore {
     }
   }
 
-  /** One attempt of the atomic enqueue on a checked-out client. BEGIN SERIALIZABLE →
-   * prune expired (drop-on-enqueue) → read live count+bytes (FOR UPDATE so the real
-   * backend serializes concurrent posts to this handle) → enforce both bounds
+  /** One attempt of the atomic enqueue on a checked-out client. BEGIN (READ COMMITTED)
+   * → take a transaction-scoped advisory lock (namespaced two-key form) on the handle (FIRST statement, so
+   * every later statement takes its snapshot after the lock is held and sees prior
+   * committed enqueues; it works even for a handle with no registry or inbox row) →
+   * prune expired (drop-on-enqueue) → read live count+bytes → enforce both bounds
    * (count-first, exact reasons — mirrors MemoryInboxStore) → conditional INSERT →
    * COMMIT. A quota rejection still COMMITs (the prune is a legitimate, committable
    * side effect); only an error rolls back (handled by the caller). */
   private async enqueueTxn(
     client: PgPoolClient,
-    input: { handle: string; message: A2AMessage; enqueuedAt: number; expiresAt: number; sizeBytes: number },
+    input: { handle: string; message: A2AMessage; enqueuedAt: number; expiresAt: number; sizeBytes: number; registration?: { did: string; registeredAt: number } },
   ): Promise<EnqueueResult> {
-    await client.query(`begin isolation level serializable`)
+    await client.query(`begin`)
+    await lockHandle(client, input.handle, this.options.lockTimeoutMs)
+    const registration = this.options.requireRegistration ? await registrationState(client, input) : "current"
+    if (registration !== "current") {
+      await client.query(`commit`)
+      return { ok: false, reason: registration }
+    }
     await client.query(`delete from inbox where handle = $1 and expires_at <= $2`, [input.handle, input.enqueuedAt])
     const agg = await client.query(
       `select count(*)::int as n, coalesce(sum(size_bytes), 0)::int as bytes
-       from inbox where handle = $1 and expires_at > $2 for update`,
+       from inbox where handle = $1 and expires_at > $2`,
       [input.handle, input.enqueuedAt],
     )
     const { n, bytes } = agg.rows[0] as { n: number; bytes: number }
@@ -143,6 +186,22 @@ export class PgInboxStore implements InboxStore {
     return res.rows.length
   }
 
+  async purge(handle: string): Promise<number> {
+    const client = await this.pool.connect()
+    try {
+      await client.query(`begin`)
+      await lockHandle(client, handle, this.options.lockTimeoutMs)
+      const res = await client.query(`delete from inbox where handle = $1 returning queue_id`, [handle])
+      await client.query(`commit`)
+      return res.rows.length
+    } catch (err) {
+      await rollbackQuietly(client)
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
   async depth(handle: string, now: number): Promise<number> {
     await this.pool.query(`delete from inbox where handle = $1 and expires_at <= $2`, [handle, now])
     const res = await this.pool.query(
@@ -151,6 +210,24 @@ export class PgInboxStore implements InboxStore {
     )
     return (res.rows[0] as { n: number }).n
   }
+}
+
+/** Under the handle lock: is the registration the relay checked still the handle's
+ * CURRENT one (same DID, same registeredAt)? "current" = yes (or, with none given, any
+ * registration exists); "registration_changed" = the handle is registered but to a
+ * different registration (a deregister + re-register raced this send); "unknown_handle"
+ * = the handle has no registration at all. */
+async function registrationState(
+  client: PgPoolClient,
+  input: { handle: string; registration?: { did: string; registeredAt: number } },
+): Promise<"current" | "registration_changed" | "unknown_handle"> {
+  if (input.registration) {
+    const match = await client.query(`select 1 from registrations where handle = $1 and did = $2 and registered_at = $3`, [input.handle, input.registration.did, input.registration.registeredAt])
+    if (match.rows.length > 0) return "current"
+  }
+  const any = await client.query(`select 1 from registrations where handle = $1`, [input.handle])
+  if (any.rows.length === 0) return "unknown_handle"
+  return input.registration ? "registration_changed" : "current"
 }
 
 /** Roll back the transaction, swallowing any rollback error so it never masks the

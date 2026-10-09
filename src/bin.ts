@@ -18,7 +18,7 @@ void (async () => {
   // and pass them as overrides; otherwise assembleRelay uses the in-memory default.
   const relay =
     config.store === "postgres"
-      ? assembleRelay(config, await assemblePostgresStores(config.databaseUrl as string, config.inboxBounds))
+      ? assembleRelay(config, await assemblePostgresStores(config.databaseUrl as string, config.inboxBounds, undefined, undefined, { poolMax: config.pgPoolMax }))
       : assembleRelay(config)
   const server = createServer(config, relay)
 

@@ -28,20 +28,25 @@ interface RegistrationRow {
   registered_at: number | string
 }
 
-export class PgRegistryStore implements RegistryStore {
-  constructor(private readonly pool: PgPool) {}
-
-  async put(reg: Registration): Promise<void> {
-    await this.pool.query(
-      `insert into registrations (handle, did, agent_card, key_agreement_pubkey, registered_at)
+/** The upsert both the registry adapter and the lifecycle store run. */
+export const UPSERT_REGISTRATION_SQL = `insert into registrations (handle, did, agent_card, key_agreement_pubkey, registered_at)
        values ($1, $2, $3, $4, $5)
        on conflict (handle) do update set
          did = excluded.did,
          agent_card = excluded.agent_card,
          key_agreement_pubkey = excluded.key_agreement_pubkey,
-         registered_at = excluded.registered_at`,
-      [reg.handle, reg.did, JSON.stringify(reg.agentCard), reg.keyAgreementPubKey ?? null, reg.registeredAt],
-    )
+         registered_at = excluded.registered_at`
+
+/** Bind parameters for `UPSERT_REGISTRATION_SQL`. */
+export function registrationParams(reg: Registration): unknown[] {
+  return [reg.handle, reg.did, JSON.stringify(reg.agentCard), reg.keyAgreementPubKey ?? null, reg.registeredAt]
+}
+
+export class PgRegistryStore implements RegistryStore {
+  constructor(private readonly pool: PgPool) {}
+
+  async put(reg: Registration): Promise<void> {
+    await this.pool.query(UPSERT_REGISTRATION_SQL, registrationParams(reg))
   }
 
   async getByHandle(handle: string): Promise<Registration | undefined> {

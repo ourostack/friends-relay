@@ -11,7 +11,7 @@ import type { Registration, QueuedMessage, A2AMessage } from "../types"
  * idempotent — a drop is a denial, never a corruption). */
 export type EnqueueResult =
   | { ok: true; queueId: string }
-  | { ok: false; reason: "quota_count" | "quota_bytes" }
+  | { ok: false; reason: "quota_count" | "quota_bytes" | "busy" | "unknown_handle" | "registration_changed" }
 
 /** A store of per-handle inbox queues of OPAQUE messages. Single-writer-per-inbox
  * semantics at the storage layer (no cross-handle interference). It is a QUEUE of
@@ -30,6 +30,11 @@ export interface InboxStore {
     enqueuedAt: number
     expiresAt: number
     sizeBytes: number
+    /** The registration (DID + registeredAt) the relay checked for this send. When
+     * present, the store re-checks it is STILL the handle's current registration
+     * atomically with the insert and refuses with `unknown_handle` otherwise, so a
+     * send in flight across a deregister + re-register cannot reach the new owner. */
+    registration?: { did: string; registeredAt: number }
   }): Promise<EnqueueResult>
 
   /** List the (non-expired) queued messages for `handle` — the NAT-traversal read
@@ -44,6 +49,11 @@ export interface InboxStore {
   /** Drop all expired messages across all handles (a sweep). Returns the count
    * dropped. Dropping is always safe. */
   dropExpired(now: number): Promise<number>
+
+  /** Remove every queued message for `handle` (used on deregistration so the next
+   * registrant of a handle never inherits the previous owner's mail). Returns the
+   * count removed. */
+  purge(handle: string): Promise<number>
 
   /** The current queued count for `handle` (non-expired) — for quota/metrics. */
   depth(handle: string, now: number): Promise<number>
@@ -111,4 +121,15 @@ export interface CredentialStore {
 
   /** Resolve a send credential to the handle it may post to, or null. */
   handleForSendCredential(sendCredential: string): Promise<string | null>
+}
+
+/** Atomic register / deregister of a handle across the registry, credentials and inbox.
+ * `deregister` removes the registration, the credentials and the queued mail together
+ * (all or nothing). `register` upserts the registration and, when the handle is NEW,
+ * clears any leftover mail. */
+export interface HandleLifecycleStore {
+  /** Returns whether the registration was newly created (false = replaced). */
+  register(reg: Registration): Promise<boolean>
+  /** Returns whether a registration existed. */
+  deregister(handle: string): Promise<boolean>
 }

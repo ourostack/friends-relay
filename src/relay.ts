@@ -19,7 +19,7 @@ import { CredentialManager } from "./security/credentials"
 import { InviteManager } from "./security/invites"
 import { RateLimiter } from "./security/rate-limit"
 import type { TokenSource } from "./security/tokens"
-import type { CredentialStore, InboxStore, InviteStore, RegistryStore } from "./store/interfaces"
+import type { CredentialStore, HandleLifecycleStore, InboxStore, InviteStore, RegistryStore } from "./store/interfaces"
 import type {
   A2AMessage,
   PublicAgentCard,
@@ -38,6 +38,9 @@ export interface RelayDeps {
   invites: InviteStore
   /** Durable store of credential bindings (the CredentialManager's persistence). */
   credentials: CredentialStore
+  /** Atomic register / deregister: a sequential composition of the three stores for
+   * the in-memory backend, a transactional one for Postgres. */
+  lifecycle: HandleLifecycleStore
   tokens: TokenSource
   clock: Clock
   logger: Logger
@@ -54,6 +57,7 @@ export type EnqueueError =
   | "rate_limited"
   | "quota_count"
   | "quota_bytes"
+  | "busy"
   | "malformed_message"
   | "recipient_mismatch"
 
@@ -76,6 +80,9 @@ export interface EnqueueInput {
   sendCredential: string
   /** The opaque A2A message. The relay validates its SHAPE and never reads content. */
   message: unknown
+  /** Set by the HTTP layer when `checkSendAccess` already charged the send rate limit
+   * for this request (before the body was read), so it is not charged twice. */
+  rateLimitChecked?: boolean
 }
 
 /** The content-blind, abuse-resistant relay. */
@@ -83,10 +90,12 @@ export class Relay {
   private readonly invites: InviteManager
   private readonly credentials: CredentialManager
   private readonly sendLimiter: RateLimiter
+  private readonly lifecycle: HandleLifecycleStore
 
   constructor(private readonly deps: RelayDeps) {
     this.invites = new InviteManager(deps.tokens, deps.invites)
     this.credentials = new CredentialManager(deps.tokens, deps.credentials)
+    this.lifecycle = deps.lifecycle
     this.sendLimiter = new RateLimiter(deps.config.sendRateLimit, deps.clock)
   }
 
@@ -136,7 +145,7 @@ export class Relay {
       }
     }
 
-    await this.deps.registry.put({
+    await this.lifecycle.register({
       handle: input.handle,
       did: input.did,
       agentCard: input.agentCard,
@@ -159,14 +168,33 @@ export class Relay {
   }
 
   /** Deregister a handle (auth'd by its inboxAuth at the HTTP layer). Revokes its
-   * credentials and removes the registration. Returns whether it existed. */
+   * credentials, purges its queued messages and removes the registration. Returns whether it existed. */
   async deregister(handle: string): Promise<boolean> {
-    await this.credentials.revoke(handle)
-    const existed = await this.deps.registry.remove(handle)
+    // One atomic operation: registration, credentials and queued mail go together or
+    // not at all, and a failure can simply be retried.
+    const existed = await this.lifecycle.deregister(handle)
     if (existed) {
       this.deps.logger.log("info", "deregistered", { handle, decision: "deregistered" })
     }
     return existed
+  }
+
+  /** Cheap pre-body access check for the send route: the same handle-then-credential
+   * gate `enqueue` runs first, WITHOUT a message. The HTTP layer uses it to turn away
+   * an unauthorised sender before reading the request body. Returns the rejection
+   * `enqueue` would give, or null when the sender may proceed. */
+  async checkSendAccess(handle: string, sendCredential: string): Promise<"unknown_handle" | "bad_send_credential" | "rate_limited" | null> {
+    if (!(await this.deps.registry.getByHandle(handle))) return "unknown_handle"
+    if (!(await this.credentials.canSendTo(sendCredential, handle))) {
+      this.deps.logger.log("warn", "enqueue_rejected", { handle, reason: "bad_send_credential" })
+      return "bad_send_credential"
+    }
+    // Charge the send rate limit here too, so a flood is refused before its body is read.
+    if (!this.sendLimiter.take(sendCredential)) {
+      this.deps.logger.log("warn", "enqueue_rejected", { handle, reason: "rate_limited" })
+      return "rate_limited"
+    }
+    return null
   }
 
   // ── enqueue (the send path: store-and-forward of CIPHERTEXT) ──────────────────
@@ -188,7 +216,7 @@ export class Relay {
     }
     // Rate-limit on the send credential (the rate-limit subject — a rotating
     // credential keeps this from being a stable per-agent identity by default).
-    if (!this.sendLimiter.take(input.sendCredential)) {
+    if (!input.rateLimitChecked && !this.sendLimiter.take(input.sendCredential)) {
       this.deps.logger.log("warn", "enqueue_rejected", { handle: input.handle, reason: "rate_limited" })
       return { ok: false, error: "rate_limited" }
     }
@@ -215,11 +243,14 @@ export class Relay {
       enqueuedAt: now,
       expiresAt: now + this.deps.config.messageTtlMs,
       sizeBytes,
+      registration: { did: reg.did, registeredAt: reg.registeredAt },
     })
     if (!result.ok) {
       // Over quota → DROP (safe). Surface the drop reason; the message is denied.
       this.deps.logger.log("warn", "enqueue_dropped", { handle: input.handle, sizeBytes, reason: result.reason })
-      return { ok: false, error: result.reason }
+      // A registration replaced in flight reads as a credential failure to the sender
+      // (the credential it presented belonged to the old registration).
+      return { ok: false, error: result.reason === "registration_changed" ? "bad_send_credential" : result.reason }
     }
     this.deps.logger.log("info", "enqueued", { handle: input.handle, sizeBytes, decision: "enqueued" })
     return { ok: true, queueId: result.queueId }

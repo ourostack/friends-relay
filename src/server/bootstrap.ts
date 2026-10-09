@@ -15,11 +15,13 @@ import {
   MemoryInboxStore,
   MemoryInviteStore,
   MemoryRegistryStore,
+  SequentialHandleLifecycle,
 } from "../store/memory"
 import type { InboxBounds } from "../store/memory"
-import type { CredentialStore, InboxStore, InviteStore, RegistryStore } from "../store/interfaces"
+import type { CredentialStore, HandleLifecycleStore, InboxStore, InviteStore, RegistryStore } from "../store/interfaces"
 import { Pool } from "pg"
 import { PgCredentialStore } from "../store/postgres/credentials"
+import { PgHandleLifecycleStore } from "../store/postgres/lifecycle"
 import { PgInboxStore } from "../store/postgres/inbox"
 import { PgInviteStore } from "../store/postgres/invites"
 import { PgRegistryStore } from "../store/postgres/registry"
@@ -34,6 +36,7 @@ export interface AssembleOverrides {
   registry?: RegistryStore
   invites?: InviteStore
   credentials?: CredentialStore
+  lifecycle?: HandleLifecycleStore
   tokens?: TokenSource
   clock?: Clock
   logger?: Logger
@@ -45,19 +48,20 @@ export interface AssembleOverrides {
  * durable stores via `assemblePostgresStores` (async — it connects + migrates) and
  * passes them here as overrides. */
 export function assembleRelay(config: RelayConfig, overrides: AssembleOverrides = {}): Relay {
-  const inbox = overrides.inbox ?? new MemoryInboxStore(config.inboxBounds)
   const registry = overrides.registry ?? new MemoryRegistryStore()
+  const inbox = overrides.inbox ?? new MemoryInboxStore(config.inboxBounds, registry)
   const invites = overrides.invites ?? new MemoryInviteStore()
   const credentials = overrides.credentials ?? new MemoryCredentialStore()
   const tokens = overrides.tokens ?? cryptoTokenSource
   const clock = overrides.clock ?? systemClock
   const logger = overrides.logger ?? silentLogger
-  return new Relay({ config, inbox, registry, invites, credentials, tokens, clock, logger })
+  return new Relay({ config, inbox, registry, invites, credentials, lifecycle: overrides.lifecycle ?? new SequentialHandleLifecycle(registry, credentials, inbox), tokens, clock, logger })
 }
 
 /** The four durable stores the Postgres backend provides. */
 export interface PostgresStores {
   inbox: InboxStore
+  lifecycle: HandleLifecycleStore
   registry: RegistryStore
   invites: InviteStore
   credentials: CredentialStore
@@ -67,7 +71,17 @@ export interface PostgresStores {
  * tests pass a pg-mem pool (fully hermetic); the default builds a real `pg` Pool. The
  * optional `logger` is used by the default factory for the pool's `'error'` listener
  * (a static event only); injected test factories ignore it. */
-export type PoolFactory = (databaseUrl: string, logger?: Logger) => PgPool
+export type PoolFactory = (databaseUrl: string, logger?: Logger, options?: PoolOptions) => PgPool
+
+/** Pool sizing for the production factory. */
+export interface PoolOptions {
+  /** Most connections the pool opens (default 10). */
+  max?: number
+}
+
+/** How long a request waits for a free pooled connection before the pool gives up and
+ * the request is answered 503 busy (instead of queueing without bound). */
+const POOL_CONNECTION_TIMEOUT_MS = 5000
 
 /** The production pool factory: a real `pg` Pool over the connection string. `pg`
  * connects LAZILY (on first query), so constructing the pool opens no socket; the
@@ -80,8 +94,8 @@ export type PoolFactory = (databaseUrl: string, logger?: Logger) => PgPool
  * (`pg_pool_error`) — it deliberately does NOT pass the error (or the connection
  * string) into the log, so nothing that could carry the connection string / content
  * can leak. */
-export function defaultPoolFactory(databaseUrl: string, logger: Logger = silentLogger): PgPool {
-  const pool = new Pool({ connectionString: databaseUrl })
+export function defaultPoolFactory(databaseUrl: string, logger: Logger = silentLogger, options: PoolOptions = {}): PgPool {
+  const pool = new Pool({ connectionString: databaseUrl, max: options.max ?? 10, connectionTimeoutMillis: POOL_CONNECTION_TIMEOUT_MS })
   pool.on("error", () => {
     logger.log("error", "pg_pool_error")
   })
@@ -94,7 +108,8 @@ export function defaultPoolFactory(databaseUrl: string, logger: Logger = silentL
  * (config.inboxBounds), exactly like the in-memory inbox. */
 export function buildPostgresStores(pool: PgPool, bounds: InboxBounds): PostgresStores {
   return {
-    inbox: new PgInboxStore(pool, bounds),
+    inbox: new PgInboxStore(pool, bounds, { requireRegistration: true }),
+    lifecycle: new PgHandleLifecycleStore(pool),
     registry: new PgRegistryStore(pool),
     invites: new PgInviteStore(pool),
     credentials: new PgCredentialStore(pool),
@@ -111,8 +126,9 @@ export async function assemblePostgresStores(
   bounds: InboxBounds,
   poolFactory: PoolFactory = defaultPoolFactory,
   logger: Logger = silentLogger,
+  options: { poolMax?: number } = {},
 ): Promise<PostgresStores> {
-  const pool = poolFactory(databaseUrl, logger)
+  const pool = poolFactory(databaseUrl, logger, { max: options.poolMax })
   await migrate(pool)
   return buildPostgresStores(pool, bounds)
 }

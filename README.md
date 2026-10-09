@@ -95,6 +95,9 @@ docker run -p 8080:8080 \
 | `RELAY_ADMIN_CREDENTIAL` | — | Gates invite issuance (required when `closed`) |
 | `RELAY_DIRECTORY_CREDENTIAL` | — | Gates directory lookups (anti-harvest) |
 | `RELAY_INBOX_MAX_MESSAGES` / `RELAY_INBOX_MAX_BYTES` | `256` / `4 MiB` | Per-handle inbox bound |
+| `RELAY_MAX_BODY_BYTES` | `1 MiB` | Largest request body read; larger gets `413 {"error":"payload_too_large"}` (checked from `content-length` up front and while streaming). `POST /register` and `POST /admin/invites` are further capped at 64 KiB. Raise it together with `RELAY_INBOX_MAX_BYTES` if senders need bigger messages. Only `POST /a2a/{handle}` gets the full cap; every route that takes no body (and unknown paths) refuses any body with 413 |
+| `RELAY_MAX_CONNECTIONS` | `1024` | Most simultaneous connections the server accepts. A request must also arrive in full within 30 s; Node enforces this on a periodic sweep, which the relay runs every 15 s, so a slow upload is cut off after 30 to 45 s. A send that waits over 5 s for the handle's inbox lock gets `503 {"error":"busy"}` |
+| `RELAY_PG_POOL_MAX` | `10` | Postgres connection pool size. A request that cannot get a connection within 5 s gets `503 {"error":"busy"}` |
 | `RELAY_MESSAGE_TTL_MS` | `7 days` | Per-message TTL |
 | `RELAY_SEND_RATE_CAPACITY` / `RELAY_SEND_RATE_REFILL_PER_SEC` | `60` / `1` | Per-send-credential rate limit |
 | `RELAY_STORE` | `memory` | Storage backend: `memory` (ephemeral) or `postgres` (durable) |

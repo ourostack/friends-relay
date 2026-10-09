@@ -22,6 +22,18 @@ describe("loadConfig — 12-factor, infra-agnostic", () => {
     expect(cfg.directoryCredential).toBeUndefined()
   })
 
+  it("reads the body cap and connection cap from env, with safe defaults", () => {
+    const d = loadConfig({ RELAY_INVITE_POLICY: "open" })
+    expect(d.maxBodyBytes).toBe(1024 * 1024)
+    expect(d.maxConnections).toBe(1024)
+    const c = loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_MAX_BODY_BYTES: "8388608", RELAY_MAX_CONNECTIONS: "50" })
+    expect(c.maxBodyBytes).toBe(8388608)
+    expect(c.maxConnections).toBe(50)
+    expect(d.pgPoolMax).toBe(10)
+    expect(loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_PG_POOL_MAX: "4" }).pgPoolMax).toBe(4)
+    expect(() => loadConfig({ RELAY_INVITE_POLICY: "open", RELAY_MAX_BODY_BYTES: "0" })).toThrow(/must be a positive integer/)
+  })
+
   it("an OPEN policy needs no admin credential", () => {
     const cfg = loadConfig({ RELAY_INVITE_POLICY: "open" })
     expect(cfg.invitePolicy).toBe("open")

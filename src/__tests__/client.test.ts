@@ -7,7 +7,7 @@ import { Relay } from "../relay"
 import { SequenceTokenSource } from "../security/tokens"
 import { handle } from "../server/http"
 import type { RelayRequest } from "../server/http"
-import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore, SequentialHandleLifecycle } from "../store/memory"
 import type { A2AMessage, PublicAgentCard } from "../types"
 import { RelayClient, RelayClientError } from "../client"
 import type { FetchLike } from "../client"
@@ -28,6 +28,9 @@ function config(overrides: Partial<RelayConfig> = {}): RelayConfig {
     inboxBounds: { maxMessages: 10, maxBytes: 1_000_000 },
     messageTtlMs: 1000,
     sendRateLimit: { capacity: 100, refillPerSec: 1 },
+    maxBodyBytes: 1024 * 1024,
+    maxConnections: 1024,
+    pgPoolMax: 10,
     ...overrides,
   }
 }
@@ -52,12 +55,16 @@ function inProcessFetch(cfg: RelayConfig, relay: Relay): FetchLike {
 }
 
 function makeClient(cfg = config()) {
+  const registry = new MemoryRegistryStore()
+  const credentials = new MemoryCredentialStore()
+  const inbox = new MemoryInboxStore(cfg.inboxBounds, registry)
   const relay = new Relay({
     config: cfg,
-    inbox: new MemoryInboxStore(cfg.inboxBounds),
-    registry: new MemoryRegistryStore(),
+    inbox,
+    registry,
     invites: new MemoryInviteStore(),
-    credentials: new MemoryCredentialStore(),
+    credentials,
+    lifecycle: new SequentialHandleLifecycle(registry, credentials, inbox),
     tokens: new SequenceTokenSource("t"),
     clock: new ManualClock(0),
     logger: new MemoryLogger(),

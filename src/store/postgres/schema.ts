@@ -16,7 +16,7 @@
  * Pool both satisfy it without coupling the store layer to the driver's class.
  *
  * `connect()` checks out a dedicated client for a multi-statement TRANSACTION (the
- * bound-enforcing inbox enqueue runs SERIALIZABLE so concurrent posts to one handle
+ * bound-enforcing inbox enqueue takes a per-handle advisory lock so concurrent posts to one handle
  * can't both pass the quota and overshoot). Both the real `pg.Pool` and the pg-mem
  * Pool implement it. */
 export interface PgPool {
@@ -102,5 +102,20 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
 export async function migrate(pool: PgPool): Promise<void> {
   for (const stmt of SCHEMA_STATEMENTS) {
     await pool.query(stmt)
+  }
+}
+
+/** Whether a thrown value is `pg-pool`'s "no connection became available within
+ * `connectionTimeoutMillis`" error (the pool is starved). Callers report it as busy. */
+export function isPoolTimeout(err: unknown): boolean {
+  return err instanceof Error && err.message === "timeout exceeded when trying to connect"
+}
+
+/** Thrown by the lifecycle store when it cannot get a handle's advisory lock within the
+ * lock timeout (SQLSTATE 55P03). The request layer answers 503 busy. */
+export class HandleBusyError extends Error {
+  constructor() {
+    super("handle busy")
+    this.name = "HandleBusyError"
   }
 }

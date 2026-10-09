@@ -12,6 +12,7 @@ import type {
   CredentialPair,
   CredentialStore,
   EnqueueResult,
+  HandleLifecycleStore,
   InboxStore,
   InviteStore,
   RegistryStore,
@@ -32,7 +33,13 @@ export class MemoryInboxStore implements InboxStore {
   private readonly queues = new Map<string, QueuedMessage[]>()
   private seq = 0
 
-  constructor(private readonly bounds: InboxBounds) {}
+  /** `registry` (optional) lets the store re-check, at insert time, that the
+   * registration the relay checked is still the handle's current one — the in-memory
+   * mirror of the Postgres store's check under the handle lock. */
+  constructor(
+    private readonly bounds: InboxBounds,
+    private readonly registry?: RegistryStore,
+  ) {}
 
   async enqueue(input: {
     handle: string
@@ -40,7 +47,17 @@ export class MemoryInboxStore implements InboxStore {
     enqueuedAt: number
     expiresAt: number
     sizeBytes: number
+    registration?: { did: string; registeredAt: number }
   }): Promise<EnqueueResult> {
+    if (input.registration && this.registry) {
+      const current = await this.registry.getByHandle(input.handle)
+      if (!current) {
+        return { ok: false, reason: "unknown_handle" }
+      }
+      if (current.did !== input.registration.did || current.registeredAt !== input.registration.registeredAt) {
+        return { ok: false, reason: "registration_changed" }
+      }
+    }
     // Read the live (non-expired) queue so expired entries don't count against the
     // bound (and get dropped as a side effect of pruning).
     const live = this.livePrune(input.handle, input.enqueuedAt)
@@ -93,6 +110,12 @@ export class MemoryInboxStore implements InboxStore {
       }
     }
     return dropped
+  }
+
+  async purge(handle: string): Promise<number> {
+    const n = this.queues.get(handle)?.length ?? 0
+    this.queues.delete(handle)
+    return n
   }
 
   async depth(handle: string, now: number): Promise<number> {
@@ -235,5 +258,31 @@ export class MemoryCredentialStore implements CredentialStore {
 
   async handleForSendCredential(sendCredential: string): Promise<string | null> {
     return this.sendCredToHandle.get(sha256Hex(sendCredential)) ?? null
+  }
+}
+
+/** Sequential register / deregister over the three stores. Not transactional (a failure
+ * mid-way leaves a partial result) — fine for the in-memory reference backend, where
+ * nothing fails mid-way; the Postgres backend provides the real atomic version. */
+export class SequentialHandleLifecycle implements HandleLifecycleStore {
+  constructor(
+    private readonly registry: RegistryStore,
+    private readonly credentials: CredentialStore,
+    private readonly inbox: InboxStore,
+  ) {}
+
+  async register(reg: Registration): Promise<boolean> {
+    const created = (await this.registry.getByHandle(reg.handle)) === undefined
+    await this.registry.put(reg)
+    if (created) await this.inbox.purge(reg.handle)
+    return created
+  }
+
+  async deregister(handle: string): Promise<boolean> {
+    const prev = await this.credentials.getCurrent(handle)
+    if (prev) await this.credentials.deleteFor(handle, prev)
+    const existed = await this.registry.remove(handle)
+    await this.inbox.purge(handle)
+    return existed
   }
 }

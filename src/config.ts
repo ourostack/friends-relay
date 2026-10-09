@@ -17,6 +17,9 @@ export type InvitePolicy = "closed" | "open"
  * (survives restarts), which requires `DATABASE_URL`. */
 export type StoreBackend = "memory" | "postgres"
 
+/** Default cap on a request body: 1 MiB. */
+export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024
+
 /** The fully-resolved relay config. */
 export interface RelayConfig {
   /** TCP bind host + port for the HTTP server. */
@@ -43,6 +46,14 @@ export interface RelayConfig {
   messageTtlMs: number
   /** Per-send-credential rate limit. */
   sendRateLimit: RateLimitConfig
+  /** Largest request body the HTTP server will read (`RELAY_MAX_BODY_BYTES`). Larger
+   * bodies get 413. `/register` and `/admin/invites` are additionally capped at 64 KiB.
+   * Raise it together with `RELAY_INBOX_MAX_BYTES` if senders need bigger messages. */
+  maxBodyBytes: number
+  /** Most simultaneous connections the HTTP server accepts (`RELAY_MAX_CONNECTIONS`). */
+  maxConnections: number
+  /** Postgres connection pool size (`RELAY_PG_POOL_MAX`). */
+  pgPoolMax: number
   /** Storage backend selector (env `RELAY_STORE`). Defaults to `memory`. */
   store: StoreBackend
   /** Postgres connection string (env `DATABASE_URL`). Present + required only when
@@ -98,6 +109,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
       capacity: intEnv(env, "RELAY_SEND_RATE_CAPACITY", 60),
       refillPerSec: intEnv(env, "RELAY_SEND_RATE_REFILL_PER_SEC", 1),
     },
+    maxBodyBytes: intEnv(env, "RELAY_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES),
+    maxConnections: intEnv(env, "RELAY_MAX_CONNECTIONS", 1024),
+    pgPoolMax: intEnv(env, "RELAY_PG_POOL_MAX", 10),
     store,
     databaseUrl,
   }

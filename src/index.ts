@@ -64,8 +64,8 @@ export { silentLogger, MemoryLogger } from "./logger"
 export type { Logger, LogLevel, LogFields } from "./logger"
 
 // ── HTTP surface + assembly ──
-export { handle, createServer, parseBearer, toRelayRequest } from "./server/http"
-export type { RelayRequest, RelayResponse } from "./server/http"
+export { handle, createServer, parseBearer, toRelayRequest, MAX_BODY_BYTES, DRAIN_GRACE_MS } from "./server/http"
+export type { RelayRequest, RelayResponse, ServerOptions } from "./server/http"
 export { assembleRelay, assemblePostgresStores, buildPostgresStores, defaultPoolFactory } from "./server/bootstrap"
 export type { AssembleOverrides, PostgresStores, PoolFactory } from "./server/bootstrap"
 
