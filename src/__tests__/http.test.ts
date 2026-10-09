@@ -12,7 +12,8 @@ import { Relay } from "../relay"
 import { SequenceTokenSource } from "../security/tokens"
 import { createServer, handle, MAX_BODY_BYTES, parseBearer, readBody, SMALL_BODY_BYTES, toRelayRequest } from "../server/http"
 import type { RelayRequest } from "../server/http"
-import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
+import { HandleBusyError } from "../store/postgres/schema"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore, SequentialHandleLifecycle } from "../store/memory"
 import type { A2AMessage, PublicAgentCard } from "../types"
 
 const CARD: PublicAgentCard = { name: "a", url: "https://a", version: "1", protocolVersion: "0.3.0", did: "did:key:zRecipient" }
@@ -40,12 +41,16 @@ function baseConfig(overrides: Partial<RelayConfig> = {}): RelayConfig {
 
 function makeRelay(config = baseConfig()) {
   const logger = new MemoryLogger()
+  const registry = new MemoryRegistryStore()
+  const credentials = new MemoryCredentialStore()
+  const inbox = new MemoryInboxStore(config.inboxBounds, registry)
   const relay = new Relay({
     config,
-    inbox: new MemoryInboxStore(config.inboxBounds),
-    registry: new MemoryRegistryStore(),
+    inbox,
+    registry,
     invites: new MemoryInviteStore(),
-    credentials: new MemoryCredentialStore(),
+    credentials,
+    lifecycle: new SequentialHandleLifecycle(registry, credentials, inbox),
     tokens: new SequenceTokenSource("t"),
     clock: new ManualClock(0),
     logger,
@@ -907,6 +912,23 @@ describe("pool starvation, early rate limit, timeout cadence, bad percent-encodi
       expect(res.status).toBe(503)
       expect(JSON.parse(res.body)).toEqual({ error: "busy" })
       expect(logger.entries.filter((e) => e.level === "error")).toEqual([])
+    } finally {
+      await close(server)
+    }
+  })
+
+  it("a lock timeout on register answers 503 busy with only a warning logged", async () => {
+    const { config } = makeRelay()
+    const logger = new MemoryLogger()
+    const locked = { register: () => Promise.reject(new HandleBusyError()) } as unknown as Relay
+    const server = createServer(config, locked, logger, { drainGraceMs: 50 })
+    const base = await listen(server)
+    try {
+      const res = await fetch(`${base}/register`, { method: "POST", body: JSON.stringify({ handle: "h" }) })
+      expect(res.status).toBe(503)
+      expect(await res.json()).toEqual({ error: "busy" })
+      expect(logger.entries.filter((e) => e.level === "error")).toEqual([])
+      expect(logger.entries.filter((e) => e.level === "warn")).toHaveLength(1)
     } finally {
       await close(server)
     }

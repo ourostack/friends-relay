@@ -11,6 +11,8 @@ import { MemoryLogger } from "../logger"
 import { SequenceTokenSource } from "../security/tokens"
 import { assemblePostgresStores, assembleRelay } from "../server/bootstrap"
 import { ADVISORY_LOCK_CLASS_ID, PgInboxStore } from "../store/postgres/inbox"
+import { Pool } from "pg"
+import { HandleBusyError, isPoolTimeout } from "../store/postgres/schema"
 import { PgCredentialStore } from "../store/postgres/credentials"
 import { PgHandleLifecycleStore } from "../store/postgres/lifecycle"
 import { PgRegistryStore } from "../store/postgres/registry"
@@ -209,7 +211,7 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
       await reg.put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 2 })
       await holder.query("commit")
       holder.release()
-      expect(await send).toEqual({ ok: false, reason: "unknown_handle" })
+      expect(await send).toEqual({ ok: false, reason: "registration_changed" })
       expect(await inbox.depth("h", 0)).toBe(0)
     })
 
@@ -248,6 +250,44 @@ describe.skipIf(!DATABASE_URL)("real Postgres", () => {
       await life.register({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 2 })
       expect((await enq(inbox, "h", { ct: "b-mail" })).ok).toBe(true)
       expect((await inbox.list("h", 0)).map((m) => m.message.parts[0].data.sealed.ct)).toEqual(["b-mail"])
+    })
+
+    it("register/deregister stuck behind a held handle lock give up as HandleBusyError", async () => {
+      const life = new PgHandleLifecycleStore(pg.newPool(), { lockTimeoutMs: 200 })
+      const holder = await pg.newPool().connect()
+      await holder.query("begin")
+      await holder.query(`select pg_advisory_xact_lock(${ADVISORY_LOCK_CLASS_ID}, hashtext($1))`, ["h"])
+      try {
+        await expect(life.register({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 1 })).rejects.toBeInstanceOf(HandleBusyError)
+        await expect(life.deregister("h")).rejects.toBeInstanceOf(HandleBusyError)
+      } finally {
+        await holder.query("rollback")
+        holder.release()
+      }
+    })
+
+    it("a send checked against a replaced registration is reported registration_changed, not unknown_handle", async () => {
+      const reg = new PgRegistryStore(pg.newPool())
+      await reg.put({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB"), registeredAt: 2 })
+      const inbox = new PgInboxStore(pg.newPool(), BOUNDS, { requireRegistration: true })
+      const r = await inbox.enqueue({ handle: "h", message: msg(), enqueuedAt: 0, expiresAt: TTL, sizeBytes: 10, registration: { did: "did:key:zA", registeredAt: 1 } })
+      expect(r).toEqual({ ok: false, reason: "registration_changed" })
+      expect(await inbox.enqueue({ handle: "nobody", message: msg(), enqueuedAt: 0, expiresAt: TTL, sizeBytes: 10, registration: { did: "x", registeredAt: 1 } })).toEqual({ ok: false, reason: "unknown_handle" })
+    })
+
+    it("pg-pool still words a starved-pool timeout the way isPoolTimeout expects", async () => {
+      const pool = new Pool({ connectionString: DATABASE_URL, max: 1, connectionTimeoutMillis: 500 })
+      const held = await pool.connect()
+      try {
+        const err = await pool.connect().then(
+          () => undefined,
+          (e: unknown) => e,
+        )
+        expect(isPoolTimeout(err)).toBe(true)
+      } finally {
+        held.release()
+        await pool.end()
+      }
     })
 
     it("queued messages and FIFO order survive a restart (fresh pool, same schema)", async () => {

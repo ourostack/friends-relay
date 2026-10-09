@@ -11,7 +11,7 @@ import type { Registration, QueuedMessage, A2AMessage } from "../types"
  * idempotent — a drop is a denial, never a corruption). */
 export type EnqueueResult =
   | { ok: true; queueId: string }
-  | { ok: false; reason: "quota_count" | "quota_bytes" | "busy" | "unknown_handle" }
+  | { ok: false; reason: "quota_count" | "quota_bytes" | "busy" | "unknown_handle" | "registration_changed" }
 
 /** A store of per-handle inbox queues of OPAQUE messages. Single-writer-per-inbox
  * semantics at the storage layer (no cross-handle interference). It is a QUEUE of

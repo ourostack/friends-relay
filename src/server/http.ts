@@ -14,7 +14,7 @@ import type { RelayConfig } from "../config"
 import { silentLogger } from "../logger"
 import type { Logger } from "../logger"
 import type { Relay } from "../relay"
-import { isPoolTimeout } from "../store/postgres/schema"
+import { HandleBusyError, isPoolTimeout } from "../store/postgres/schema"
 
 /** A transport-free representation of an HTTP request (so handlers are pure +
  * testable without a socket). */
@@ -424,9 +424,10 @@ export function createServer(config: RelayConfig, relay: Relay, logger: Logger =
       res.writeHead(response.status, { "content-type": "application/json" })
       res.end(JSON.stringify(response.body))
     })().catch((err: unknown) => {
-      // A starved connection pool is overload, not a bug: tell the client to retry.
-      const busy = isPoolTimeout(err)
-      logger.log(busy ? "warn" : "error", busy ? "pool_busy" : "request_failed")
+      // A starved connection pool or a held handle lock is overload, not a bug: tell
+      // the client to retry.
+      const busy = isPoolTimeout(err) || err instanceof HandleBusyError
+      logger.log(busy ? "warn" : "error", busy ? "request_busy" : "request_failed")
       if (!res.headersSent) {
         res.writeHead(busy ? 503 : 500, { "content-type": "application/json" })
       }

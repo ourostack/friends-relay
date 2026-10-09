@@ -6,11 +6,12 @@ import { ManualClock } from "../clock"
 import { MemoryLogger } from "../logger"
 import { Relay } from "../relay"
 import { SequenceTokenSource } from "../security/tokens"
-import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore } from "../store/memory"
+import { MemoryCredentialStore, MemoryInboxStore, MemoryInviteStore, MemoryRegistryStore, SequentialHandleLifecycle } from "../store/memory"
 import { PgCredentialStore } from "../store/postgres/credentials"
 import { PgInboxStore } from "../store/postgres/inbox"
 import { PgHandleLifecycleStore } from "../store/postgres/lifecycle"
 import { PgRegistryStore } from "../store/postgres/registry"
+import { HandleBusyError } from "../store/postgres/schema"
 import type { PgPool, PgPoolClient } from "../store/postgres/schema"
 import type { A2AMessage, PublicAgentCard, Registration } from "../types"
 import { migratedPgMem } from "./pg-harness"
@@ -31,7 +32,7 @@ describe("MemoryInboxStore — registration generation", () => {
     await registry.remove("h")
     expect(await inbox.enqueue(ENQ("2", checkedA))).toEqual({ ok: false, reason: "unknown_handle" })
     await registry.put(reg("did:key:zB", 5))
-    expect(await inbox.enqueue(ENQ("3", checkedA))).toEqual({ ok: false, reason: "unknown_handle" })
+    expect(await inbox.enqueue(ENQ("3", checkedA))).toEqual({ ok: false, reason: "registration_changed" })
     expect((await inbox.enqueue(ENQ("4", { did: "did:key:zB", registeredAt: 5 }))).ok).toBe(true)
     expect((await inbox.enqueue(ENQ("5"))).ok).toBe(true) // no registration passed: not checked
   })
@@ -44,14 +45,15 @@ describe("PgInboxStore — registration generation (pg-mem)", () => {
     const inbox = new PgInboxStore(pool, BOUNDS, { requireRegistration: true })
     await registry.put(reg("did:key:zA", 0))
     await registry.remove("h")
+    expect(await inbox.enqueue(ENQ("0", { did: "did:key:zA", registeredAt: 0 }))).toEqual({ ok: false, reason: "unknown_handle" })
     await registry.put(reg("did:key:zB", 5))
-    expect(await inbox.enqueue(ENQ("1", { did: "did:key:zA", registeredAt: 0 }))).toEqual({ ok: false, reason: "unknown_handle" })
+    expect(await inbox.enqueue(ENQ("1", { did: "did:key:zA", registeredAt: 0 }))).toEqual({ ok: false, reason: "registration_changed" })
     expect((await inbox.enqueue(ENQ("2", { did: "did:key:zB", registeredAt: 5 }))).ok).toBe(true)
   })
 })
 
 /** A pool whose clients throw on the first statement matching `pattern`. */
-function faulty(pool: PgPool, pattern: RegExp): { pool: PgPool; armed: { on: boolean } } {
+function faulty(pool: PgPool, pattern: RegExp, code?: string): { pool: PgPool; armed: { on: boolean } } {
   const armed = { on: false }
   return {
     armed,
@@ -64,7 +66,7 @@ function faulty(pool: PgPool, pattern: RegExp): { pool: PgPool; armed: { on: boo
           query: async (t, p) => {
             if (armed.on && pattern.test(t)) {
               armed.on = false
-              throw new Error("injected failure")
+              throw Object.assign(new Error("injected failure"), { code })
             }
             return c.query(t, p)
           },
@@ -109,11 +111,42 @@ describe("PgHandleLifecycleStore (pg-mem)", () => {
   })
 })
 
+describe("PgHandleLifecycleStore lock timeout (pg-mem)", () => {
+  it("a lock timeout (55P03) on register or deregister surfaces as HandleBusyError", async () => {
+    const { pool } = await migratedPgMem()
+    const f1 = faulty(pool, /set local lock_timeout/, "55P03")
+    f1.armed.on = true
+    await expect(new PgHandleLifecycleStore(f1.pool).register(reg("did:key:zB"))).rejects.toBeInstanceOf(HandleBusyError)
+    const f2 = faulty(pool, /set local lock_timeout/, "55P03")
+    f2.armed.on = true
+    const dereg = new PgHandleLifecycleStore(f2.pool)
+    await expect(dereg.deregister("h")).rejects.toBeInstanceOf(HandleBusyError)
+  })
+})
+
+describe("Relay maps the store's in-flight refusals", () => {
+  it.each([
+    ["registration_changed", "bad_send_credential"],
+    ["unknown_handle", "unknown_handle"],
+  ] as const)("inbox reason %s → relay error %s", async (reason, expected) => {
+    const config = { invitePolicy: "open", sendRateLimit: { capacity: 100, refillPerSec: 1 }, inboxBounds: BOUNDS, messageTtlMs: 1000, publicUrl: "u", did: "d", version: "1", protocolVersion: "0.3.0" } as never
+    const registry = new MemoryRegistryStore()
+    const credentials = new MemoryCredentialStore()
+    const inbox = new MemoryInboxStore(BOUNDS, registry)
+    const relay = new Relay({ config, inbox: { ...inbox, enqueue: async () => ({ ok: false, reason }) } as never, registry, invites: new MemoryInviteStore(), credentials, lifecycle: new SequentialHandleLifecycle(registry, credentials, inbox), tokens: new SequenceTokenSource("t"), clock: new ManualClock(0), logger: new MemoryLogger() })
+    const a = await relay.register({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB") })
+    if (!a.ok) throw new Error("setup")
+    expect(await relay.enqueue({ handle: "h", sendCredential: a.grant.sendCredential, message: msg("x") })).toEqual({ ok: false, error: expected })
+  })
+})
+
 describe("Relay over memory stores — deregister then register a new owner", () => {
   it("the new owner starts with an empty inbox and the old credentials are dead", async () => {
     const config = { invitePolicy: "open", sendRateLimit: { capacity: 100, refillPerSec: 1 }, inboxBounds: BOUNDS, messageTtlMs: 1000, publicUrl: "u", did: "d", version: "1", protocolVersion: "0.3.0" } as never
     const registry = new MemoryRegistryStore()
-    const relay = new Relay({ config, inbox: new MemoryInboxStore(BOUNDS, registry), registry, invites: new MemoryInviteStore(), credentials: new MemoryCredentialStore(), tokens: new SequenceTokenSource("t"), clock: new ManualClock(0), logger: new MemoryLogger() })
+    const credentials = new MemoryCredentialStore()
+    const inbox = new MemoryInboxStore(BOUNDS, registry)
+    const relay = new Relay({ config, inbox, registry, invites: new MemoryInviteStore(), credentials, lifecycle: new SequentialHandleLifecycle(registry, credentials, inbox), tokens: new SequenceTokenSource("t"), clock: new ManualClock(0), logger: new MemoryLogger() })
     const a = await relay.register({ handle: "h", did: "did:key:zB", agentCard: card("did:key:zB") })
     if (!a.ok) throw new Error("setup")
     expect((await relay.enqueue({ handle: "h", sendCredential: a.grant.sendCredential, message: msg("old") })).ok).toBe(true)

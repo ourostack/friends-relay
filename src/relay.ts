@@ -20,7 +20,6 @@ import { InviteManager } from "./security/invites"
 import { RateLimiter } from "./security/rate-limit"
 import type { TokenSource } from "./security/tokens"
 import type { CredentialStore, HandleLifecycleStore, InboxStore, InviteStore, RegistryStore } from "./store/interfaces"
-import { SequentialHandleLifecycle } from "./store/memory"
 import type {
   A2AMessage,
   PublicAgentCard,
@@ -39,9 +38,9 @@ export interface RelayDeps {
   invites: InviteStore
   /** Durable store of credential bindings (the CredentialManager's persistence). */
   credentials: CredentialStore
-  /** Atomic register / deregister. Defaults to a sequential composition of the three
-   * stores (fine in memory); the Postgres backend supplies a transactional one. */
-  lifecycle?: HandleLifecycleStore
+  /** Atomic register / deregister: a sequential composition of the three stores for
+   * the in-memory backend, a transactional one for Postgres. */
+  lifecycle: HandleLifecycleStore
   tokens: TokenSource
   clock: Clock
   logger: Logger
@@ -96,7 +95,7 @@ export class Relay {
   constructor(private readonly deps: RelayDeps) {
     this.invites = new InviteManager(deps.tokens, deps.invites)
     this.credentials = new CredentialManager(deps.tokens, deps.credentials)
-    this.lifecycle = deps.lifecycle ?? new SequentialHandleLifecycle(deps.registry, deps.credentials, deps.inbox)
+    this.lifecycle = deps.lifecycle
     this.sendLimiter = new RateLimiter(deps.config.sendRateLimit, deps.clock)
   }
 
@@ -249,7 +248,9 @@ export class Relay {
     if (!result.ok) {
       // Over quota → DROP (safe). Surface the drop reason; the message is denied.
       this.deps.logger.log("warn", "enqueue_dropped", { handle: input.handle, sizeBytes, reason: result.reason })
-      return { ok: false, error: result.reason }
+      // A registration replaced in flight reads as a credential failure to the sender
+      // (the credential it presented belonged to the old registration).
+      return { ok: false, error: result.reason === "registration_changed" ? "bad_send_credential" : result.reason }
     }
     this.deps.logger.log("info", "enqueued", { handle: input.handle, sizeBytes, decision: "enqueued" })
     return { ok: true, queueId: result.queueId }

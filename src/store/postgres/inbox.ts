@@ -128,9 +128,10 @@ export class PgInboxStore implements InboxStore {
   ): Promise<EnqueueResult> {
     await client.query(`begin`)
     await lockHandle(client, input.handle, this.options.lockTimeoutMs)
-    if (this.options.requireRegistration && !(await currentRegistrationExists(client, input))) {
+    const registration = this.options.requireRegistration ? await registrationState(client, input) : "current"
+    if (registration !== "current") {
       await client.query(`commit`)
-      return { ok: false, reason: "unknown_handle" }
+      return { ok: false, reason: registration }
     }
     await client.query(`delete from inbox where handle = $1 and expires_at <= $2`, [input.handle, input.enqueuedAt])
     const agg = await client.query(
@@ -211,19 +212,22 @@ export class PgInboxStore implements InboxStore {
   }
 }
 
-/** Under the handle lock: whether the registration the relay checked is still the
- * handle's CURRENT one (same DID, same registeredAt) — so a send that raced a
- * deregister + re-register by a new owner is refused rather than landing in the new
- * owner's inbox. Without a checked registration, any registration for the handle will
- * do. */
-async function currentRegistrationExists(
+/** Under the handle lock: is the registration the relay checked still the handle's
+ * CURRENT one (same DID, same registeredAt)? "current" = yes (or, with none given, any
+ * registration exists); "registration_changed" = the handle is registered but to a
+ * different registration (a deregister + re-register raced this send); "unknown_handle"
+ * = the handle has no registration at all. */
+async function registrationState(
   client: PgPoolClient,
   input: { handle: string; registration?: { did: string; registeredAt: number } },
-): Promise<boolean> {
-  const res = input.registration
-    ? await client.query(`select 1 from registrations where handle = $1 and did = $2 and registered_at = $3`, [input.handle, input.registration.did, input.registration.registeredAt])
-    : await client.query(`select 1 from registrations where handle = $1`, [input.handle])
-  return res.rows.length > 0
+): Promise<"current" | "registration_changed" | "unknown_handle"> {
+  if (input.registration) {
+    const match = await client.query(`select 1 from registrations where handle = $1 and did = $2 and registered_at = $3`, [input.handle, input.registration.did, input.registration.registeredAt])
+    if (match.rows.length > 0) return "current"
+  }
+  const any = await client.query(`select 1 from registrations where handle = $1`, [input.handle])
+  if (any.rows.length === 0) return "unknown_handle"
+  return input.registration ? "registration_changed" : "current"
 }
 
 /** Roll back the transaction, swallowing any rollback error so it never masks the

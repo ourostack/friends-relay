@@ -7,7 +7,11 @@ import type { HandleLifecycleStore } from "../interfaces"
 import type { Registration } from "../../types"
 import { lockHandle } from "./handle-lock"
 import { UPSERT_REGISTRATION_SQL, registrationParams } from "./registry"
+import { HandleBusyError } from "./schema"
 import type { PgPool, PgPoolClient } from "./schema"
+
+/** SQLSTATE `lock_not_available`: lock_timeout expired while waiting for the handle lock. */
+const LOCK_NOT_AVAILABLE = "55P03"
 
 export class PgHandleLifecycleStore implements HandleLifecycleStore {
   constructor(
@@ -53,7 +57,7 @@ export class PgHandleLifecycleStore implements HandleLifecycleStore {
       } catch {
         /* the original error is what matters */
       }
-      throw err
+      throw (err as { code?: unknown } | null)?.code === LOCK_NOT_AVAILABLE ? new HandleBusyError() : err
     } finally {
       client.release()
     }

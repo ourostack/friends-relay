@@ -15,6 +15,7 @@ import {
   MemoryInboxStore,
   MemoryInviteStore,
   MemoryRegistryStore,
+  SequentialHandleLifecycle,
 } from "../store/memory"
 import type { InboxBounds } from "../store/memory"
 import type { CredentialStore, HandleLifecycleStore, InboxStore, InviteStore, RegistryStore } from "../store/interfaces"
@@ -54,7 +55,7 @@ export function assembleRelay(config: RelayConfig, overrides: AssembleOverrides 
   const tokens = overrides.tokens ?? cryptoTokenSource
   const clock = overrides.clock ?? systemClock
   const logger = overrides.logger ?? silentLogger
-  return new Relay({ config, inbox, registry, invites, credentials, lifecycle: overrides.lifecycle, tokens, clock, logger })
+  return new Relay({ config, inbox, registry, invites, credentials, lifecycle: overrides.lifecycle ?? new SequentialHandleLifecycle(registry, credentials, inbox), tokens, clock, logger })
 }
 
 /** The four durable stores the Postgres backend provides. */

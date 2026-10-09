@@ -110,3 +110,12 @@ export async function migrate(pool: PgPool): Promise<void> {
 export function isPoolTimeout(err: unknown): boolean {
   return err instanceof Error && err.message === "timeout exceeded when trying to connect"
 }
+
+/** Thrown by the lifecycle store when it cannot get a handle's advisory lock within the
+ * lock timeout (SQLSTATE 55P03). The request layer answers 503 busy. */
+export class HandleBusyError extends Error {
+  constructor() {
+    super("handle busy")
+    this.name = "HandleBusyError"
+  }
+}

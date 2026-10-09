@@ -51,8 +51,11 @@ export class MemoryInboxStore implements InboxStore {
   }): Promise<EnqueueResult> {
     if (input.registration && this.registry) {
       const current = await this.registry.getByHandle(input.handle)
-      if (!current || current.did !== input.registration.did || current.registeredAt !== input.registration.registeredAt) {
+      if (!current) {
         return { ok: false, reason: "unknown_handle" }
+      }
+      if (current.did !== input.registration.did || current.registeredAt !== input.registration.registeredAt) {
+        return { ok: false, reason: "registration_changed" }
       }
     }
     // Read the live (non-expired) queue so expired entries don't count against the
