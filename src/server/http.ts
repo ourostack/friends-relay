@@ -88,7 +88,7 @@ export async function handle(config: RelayConfig, relay: Relay, req: RelayReques
 
   // ── admin: issue an invite (admin-credential gated) ──
   if (req.method === "POST" && req.path === "/admin/invites") {
-    if (!config.adminCredential || req.bearer !== config.adminCredential) {
+    if (!adminAllowed(config, req)) {
       return { status: 401, body: { error: "unauthorized" } }
     }
     const uses = readUses(req.body)
@@ -188,6 +188,11 @@ export async function handle(config: RelayConfig, relay: Relay, req: RelayReques
   return JSON_404
 }
 
+/** Admin gating: a configured admin credential, presented as the bearer. */
+function adminAllowed(config: RelayConfig, req: RelayRequest): boolean {
+  return Boolean(config.adminCredential) && req.bearer === config.adminCredential
+}
+
 /** Directory gating: if a directory credential is configured, require it; if none
  * is configured the directory is open (a deliberate per-deploy choice). */
 function directoryAllowed(config: RelayConfig, req: RelayRequest): boolean {
@@ -223,52 +228,136 @@ export function toRelayRequest(input: {
   }
 }
 
+/** The default cap on a request body: 1 MiB. Every JSON body this relay accepts (an
+ * invite request, a registration, one sealed message bounded by the inbox byte quota)
+ * is far smaller; anything bigger is refused before it can be buffered into memory. */
+export const MAX_BODY_BYTES = 1024 * 1024
+
+/** Tunables for `createServer`. */
+export interface ServerOptions {
+  /** Maximum request body in bytes (default `MAX_BODY_BYTES`). */
+  maxBodyBytes?: number
+  /** How long to keep discarding an unread body after an early rejection before the
+   * connection is destroyed (default `DRAIN_GRACE_MS`). */
+  drainGraceMs?: number
+}
+
+/** Default grace for discarding an unread body after an early rejection. */
+export const DRAIN_GRACE_MS = 1000
+
+/** Credential checks that need only the request line + headers, run BEFORE the body is
+ * read so an unauthenticated caller cannot make the server buffer anything. Returns the
+ * same rejection `handle()` would give for that credential, or undefined to continue.
+ * Routes whose credential is checked here: admin invite issuance, deregistration, and
+ * the A2A send. (Pull/ack/directory carry no body; /register is gated by an invite
+ * token inside the body, so it relies on the size cap alone.) */
+export async function authorizeBeforeBody(config: RelayConfig, relay: Relay, req: RelayRequest): Promise<RelayResponse | undefined> {
+  if (req.method === "POST" && req.path === "/admin/invites") {
+    return adminAllowed(config, req) ? undefined : { status: 401, body: { error: "unauthorized" } }
+  }
+  const deregMatch = /^\/register\/([^/]+)$/.exec(req.path)
+  if (req.method === "DELETE" && deregMatch) {
+    const handle = decodeURIComponent(deregMatch[1])
+    return req.bearer && (await relay.ownsInbox(handle, req.bearer)) ? undefined : { status: 401, body: { error: "unauthorized" } }
+  }
+  const a2aMatch = /^\/a2a\/([^/]+)$/.exec(req.path)
+  if (req.method === "POST" && a2aMatch) {
+    const error = await relay.checkSendAccess(decodeURIComponent(a2aMatch[1]), req.bearer ?? "")
+    return error ? { status: enqueueStatus(error), body: { error } } : undefined
+  }
+  return undefined
+}
+
+/** Read the request body, giving up (null) as soon as more than `limit` bytes arrive. */
+function readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    const onData = (c: Buffer): void => {
+      size += c.length
+      if (size > limit) {
+        req.off("data", onData)
+        req.off("end", onEnd)
+        resolve(null)
+        return
+      }
+      chunks.push(c)
+    }
+    const onEnd = (): void => resolve(Buffer.concat(chunks))
+    req.on("data", onData)
+    req.on("end", onEnd)
+  })
+}
+
+/** Answer without having consumed the request body: discard (never
+ * buffer) whatever the client is still sending so it can read the response instead of
+ * hitting a reset (closing a socket with unread data resets it), and destroy the request after `graceMs` so a
+ * client that never stops sending cannot hold the socket open. */
+function respondAndClose(req: IncomingMessage, res: ServerResponse, response: RelayResponse, graceMs: number): void {
+  res.writeHead(response.status, { "content-type": "application/json" })
+  res.end(JSON.stringify(response.body))
+  req.resume()
+  const timer = setTimeout(() => req.destroy(), graceMs)
+  timer.unref()
+  req.once("close", () => clearTimeout(timer))
+}
+
+const PAYLOAD_TOO_LARGE: RelayResponse = { status: 413, body: { error: "payload_too_large" } }
+
 /** Bind the pure router to a real node:http server. The only un-pure wiring. `logger`
  * is used SOLELY to record a static event when a request handler rejects (e.g. a
  * Postgres query throws mid-request) — it logs an event NAME only, never the error
  * message / connection string / any content (the relay is content-blind end to end). */
-export function createServer(config: RelayConfig, relay: Relay, logger: Logger = silentLogger): Server {
+export function createServer(config: RelayConfig, relay: Relay, logger: Logger = silentLogger, options: ServerOptions = {}): Server {
+  const limit = options.maxBodyBytes ?? MAX_BODY_BYTES
+  const graceMs = options.drainGraceMs ?? DRAIN_GRACE_MS
   return createHttpServer((req: IncomingMessage, res: ServerResponse) => {
-    const chunks: Buffer[] = []
-    req.on("data", (c: Buffer) => chunks.push(c))
-    req.on("end", () => {
-      // The handler is async + can REJECT (the storage seam is async — a Postgres
-      // query can throw mid-request). Without this `.catch` the socket would hang
-      // forever (no response) AND the rejection would be unhandled. The catch writes a
-      // generic 500 + ends the socket, and logs a STATIC event name only — the caught
-      // error is deliberately NOT inspected, so nothing it carries (a message body, a
-      // connection string, any content) can leak into the log or the response.
-      void (async () => {
-        const raw = Buffer.concat(chunks).toString("utf8")
-        let body: unknown
-        if (raw.length > 0) {
-          try {
-            body = JSON.parse(raw)
-          } catch {
-            res.writeHead(400, { "content-type": "application/json" })
-            res.end(JSON.stringify({ error: "bad_json" }))
-            return
-          }
+    // The handler is async + can REJECT (the storage seam is async — a Postgres
+    // query can throw mid-request). Without this `.catch` the socket would hang
+    // forever (no response) AND the rejection would be unhandled. The catch writes a
+    // generic 500 + ends the socket, and logs a STATIC event name only — the caught
+    // error is deliberately NOT inspected, so nothing it carries (a message body, a
+    // connection string, any content) can leak into the log or the response.
+    void (async () => {
+      const headers = req.headers as Record<string, string | undefined>
+      const head = toRelayRequest({ method: req.method, url: req.url, headers, body: undefined })
+      // 1. Turn away a missing/wrong credential before reading a single body byte.
+      const denied = await authorizeBeforeBody(config, relay, head)
+      if (denied) {
+        respondAndClose(req, res, denied, graceMs)
+        return
+      }
+      // 2. A declared length over the cap is refused up front; an undeclared or
+      //    understated one is caught while streaming.
+      if (Number(headers["content-length"]) > limit) {
+        respondAndClose(req, res, PAYLOAD_TOO_LARGE, graceMs)
+        return
+      }
+      const buf = await readBody(req, limit)
+      if (buf === null) {
+        respondAndClose(req, res, PAYLOAD_TOO_LARGE, graceMs)
+        return
+      }
+      const raw = buf.toString("utf8")
+      let body: unknown
+      if (raw.length > 0) {
+        try {
+          body = JSON.parse(raw)
+        } catch {
+          res.writeHead(400, { "content-type": "application/json" })
+          res.end(JSON.stringify({ error: "bad_json" }))
+          return
         }
-        const response = await handle(
-          config,
-          relay,
-          toRelayRequest({
-            method: req.method,
-            url: req.url,
-            headers: req.headers as Record<string, string | undefined>,
-            body,
-          }),
-        )
-        res.writeHead(response.status, { "content-type": "application/json" })
-        res.end(JSON.stringify(response.body))
-      })().catch(() => {
-        logger.log("error", "request_failed")
-        if (!res.headersSent) {
-          res.writeHead(500, { "content-type": "application/json" })
-        }
-        res.end(JSON.stringify({ error: "internal_error" }))
-      })
+      }
+      const response = await handle(config, relay, { ...head, body })
+      res.writeHead(response.status, { "content-type": "application/json" })
+      res.end(JSON.stringify(response.body))
+    })().catch(() => {
+      logger.log("error", "request_failed")
+      if (!res.headersSent) {
+        res.writeHead(500, { "content-type": "application/json" })
+      }
+      res.end(JSON.stringify({ error: "internal_error" }))
     })
   })
 }
