@@ -16,7 +16,7 @@
  * Pool both satisfy it without coupling the store layer to the driver's class.
  *
  * `connect()` checks out a dedicated client for a multi-statement TRANSACTION (the
- * bound-enforcing inbox enqueue runs SERIALIZABLE so concurrent posts to one handle
+ * bound-enforcing inbox enqueue takes a per-handle advisory lock so concurrent posts to one handle
  * can't both pass the quota and overshoot). Both the real `pg.Pool` and the pg-mem
  * Pool implement it. */
 export interface PgPool {

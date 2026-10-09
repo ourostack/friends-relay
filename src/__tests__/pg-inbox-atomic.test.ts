@@ -1,5 +1,5 @@
 // pg-inbox-atomic.test — RF4: the PgInboxStore enqueue is an ATOMIC, bound-enforcing
-// SERIALIZABLE transaction (prune → count/sum → conditional insert in one txn), so two
+// advisory-locked transaction (prune → count/sum → conditional insert in one txn), so two
 // concurrent posts to one handle can't both pass the quota and overshoot. The exact
 // cap behavior + distinct quota reasons are covered hermetically by the dual-backend
 // parity suite (store.test.ts) over pg-mem; THIS file covers the parts pg-mem cannot
@@ -102,7 +102,7 @@ describe("RF4 — PgInboxStore atomic enqueue: serialization-failure retry seman
     expect(res.ok).toBe(true)
     expect(ctrl.attempts).toBe(2) // one failed attempt + one success
     expect(ctrl.inserts).toBe(1) // the message landed exactly once (no double-insert)
-    // The first (failed) attempt rolled back; the transaction used SERIALIZABLE.
+    // The first (failed) attempt rolled back; the whole transaction is retried.
     expect(ctrl.verbs).toContain("rollback")
     expect(ctrl.verbs.filter((v) => v === "begin")).toHaveLength(2)
   })
