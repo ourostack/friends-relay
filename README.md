@@ -1,3 +1,9 @@
+<!-- ourostack:brand:start -->
+<p align="center">
+  <a href="https://github.com/ourostack"><img src="https://raw.githubusercontent.com/ourostack/.github/main/brand/ouro.png" alt="Ourostack" width="96" height="96"></a>
+</p>
+<!-- ourostack:brand:end -->
+
 # friends-relay
 
 A **content-blind, abuse-resistant A2A relay + directory** for [friends](https://github.com/ourostack/friends)-using agents — friends' own communication infrastructure, for **any** harness that uses the friends library.
