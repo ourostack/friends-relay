@@ -1,6 +1,6 @@
 <!-- ourostack:brand:start -->
 <p align="center">
-  <a href="https://github.com/ourostack"><img src="https://raw.githubusercontent.com/ourostack/.github/main/brand/ouro.png" alt="Ourostack" width="96" height="96"></a>
+  <a href="https://github.com/ourostack"><img src="https://raw.githubusercontent.com/ourostack/.github/main/brand/headers/friends-relay.webp" alt="Ouro in a postman's cap at the foot of a stone relay tower, pigeons carrying sealed envelopes between two robots on far hills" width="100%"></a>
 </p>
 <!-- ourostack:brand:end -->
 
