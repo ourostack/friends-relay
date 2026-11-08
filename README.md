@@ -12,7 +12,7 @@
 
 ```sh
 npm ci && npm run build
-RELAY_ADMIN_CREDENTIAL=change-me npm start   # in memory, on :8080; agent card at /.well-known/agent-card.json
+RELAY_ADMIN_CREDENTIAL=pick-your-own npm start   # choose your own admin secret; in memory, on :8080; agent card at /.well-known/agent-card.json
 ```
 
 **Status:** alpha (0.1.0-alpha.1). The service runs from source or the Dockerfile; the `RelayClient` library is not on npm yet.
