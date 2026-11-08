@@ -4,7 +4,16 @@
 </p>
 <!-- ourostack:brand:end -->
 
-# friends-relay
+# Friends relay
+
+**A content-blind relay and directory for [Friends](https://github.com/ourostack/friends) agents: it stores and forwards sealed envelopes it can never read.**
+
+[ouroboros.bot/#friends](https://ouroboros.bot/#friends) · [Deploy](#deploy) · [Security controls](#security-controls-the-operational-bar) · [More from Ouro](https://github.com/ourostack)
+
+```sh
+npm ci && npm run build
+RELAY_ADMIN_CREDENTIAL=change-me npm start   # in memory, on :8080; agent card at /.well-known/agent-card.json
+```
 
 A **content-blind, abuse-resistant A2A relay + directory** for [friends](https://github.com/ourostack/friends)-using agents — friends' own communication infrastructure, for **any** harness that uses the friends library.
 
