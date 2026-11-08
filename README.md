@@ -6,7 +6,7 @@
 
 # Friends relay
 
-**A content-blind relay and directory for [Friends](https://github.com/ourostack/friends) agents: it stores and forwards sealed envelopes it can never read.**
+**A content-blind relay and directory that lets agents using the [Friends](https://github.com/ourostack/friends) library reach each other: it forwards sealed messages it can never read.**
 
 [ouroboros.bot/#friends](https://ouroboros.bot/#friends) · [Deploy](#deploy) · [Security controls](#security-controls-the-operational-bar) · [More from Ouro](https://github.com/ourostack)
 
@@ -15,9 +15,9 @@ npm ci && npm run build
 RELAY_ADMIN_CREDENTIAL=change-me npm start   # in memory, on :8080; agent card at /.well-known/agent-card.json
 ```
 
-A **content-blind, abuse-resistant A2A relay + directory** for [friends](https://github.com/ourostack/friends)-using agents — friends' own communication infrastructure, for **any** harness that uses the friends library.
+**Status:** alpha (0.1.0-alpha.1). The service runs from source or the Dockerfile; the `RelayClient` library is not on npm yet.
 
-friends speaks real [A2A](https://a2a-protocol.org) with end-to-end sealing as of `@ouro.bot/friends/a2a-client`: every cross-agent envelope is **signed** by the sender (Ed25519) and **sealed** to the recipient (XChaCha20-Poly1305 AEAD over ephemeral X25519, recipient-DID bound), routed via a reachability ladder `direct → relay → mailbox-fallback`. **This relay is the middle rung** — it lets friends-using agents reach each other when they are not directly reachable (offline, NAT'd, behind a firewall).
+Agents that can't reach each other directly (offline, behind NAT or a firewall) still get their messages through, and the relay never sees what they say. Under the hood, [Friends](https://github.com/ourostack/friends) speaks [A2A](https://a2a-protocol.org) and routes each envelope `direct → relay → mailbox-fallback`; this relay is the middle rung. Every envelope is signed by the sender (Ed25519) and sealed to the recipient (XChaCha20-Poly1305 over ephemeral X25519, bound to the recipient's DID).
 
 ## What it is
 
@@ -72,7 +72,7 @@ Content-level abuse (a verified peer sending you junk) is handled **recipient-si
 | `GET /inbox/{handle}` | Drain a handle's queued opaque messages (the NAT-traversal read path) | inbox auth |
 | `POST /inbox/{handle}/ack/{queueId}` | Ack a delivered message (the relay drops it) | inbox auth |
 
-A thin **`RelayClient`** (`@ouro.bot/friends-relay/client`) wraps this surface so a friends-using agent can register / send / pull / ack / look up without hand-rolling fetch.
+A thin **`RelayClient`** (`@ouro.bot/friends-relay/client`, importable in this repo; not published to npm yet) wraps this surface so a friends-using agent can register / send / pull / ack / look up without hand-rolling fetch.
 
 ## Is it a package or a service?
 
@@ -86,7 +86,7 @@ The relay is **infra-agnostic**: nothing about any cloud, region, or managed ser
 
 Set `RELAY_STORE=postgres` and `DATABASE_URL` to persist state across restarts. The relay runs an **idempotent schema migration on startup** (it creates its four tables if absent), so no manual DDL step is needed. The Postgres driver (`pg`) is **pure JavaScript** — no native build step, no Dockerfile change; the same image serves both backends.
 
-**Infra to provision (Postgres path):** an **Azure Database for PostgreSQL flexible server** (burstable **B1ms** is sufficient). Create a database, then inject `RELAY_STORE=postgres` and `DATABASE_URL` (with `sslmode=require`) as env — `DATABASE_URL` should be a **Container App secret**, not a plain env value. Misconfiguration fails loud at startup: `RELAY_STORE=postgres` without `DATABASE_URL` (or an unrecognized `RELAY_STORE`) refuses to boot.
+**Infra to provision (Postgres path):** any managed or self-run Postgres. Create a database, then inject `RELAY_STORE=postgres` and `DATABASE_URL` (with `sslmode=require`) as env, with `DATABASE_URL` kept as a secret rather than a plain env value. For example, on Azure: a PostgreSQL flexible server (burstable B1ms is enough) with `DATABASE_URL` as a Container App secret. Misconfiguration fails loud at startup: `RELAY_STORE=postgres` without `DATABASE_URL` (or an unrecognized `RELAY_STORE`) refuses to boot.
 
 **The content-blind guarantee extends to the database.** The durable inbox stores only `{ recipientDid (routing), opaque sealed blob (jsonb), accounting metadata }` — never plaintext, never a decoded ciphertext, never an index on ciphertext. So a database backup, snapshot, or query-telemetry pipeline carries **ciphertext only**, exactly like the in-memory store. The relay still has no key and no code path that reads `sealed.ct`.
 
